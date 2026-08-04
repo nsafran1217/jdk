@@ -352,33 +352,38 @@ void os::current_stack_base_and_size(address* base, size_t* size) {
     int guard_pages = align_up(guard_bytes, page_bytes) / page_bytes;
     assert(guard_bytes == guard_pages * page_bytes, "unaligned guard");
 
-#ifdef IA64
-    // IA-64 has two stacks: the memory stack growing downwards and the RSE
-    // register backing store growing upwards.
-    //
-    // Contrary to what this comment used to claim, they are not two halves of
-    // one region meeting in the centre. pthread_attr_getstack() reports only
-    // the memory stack; the register backing store lives below it, and for the
-    // main thread in an entirely separate mapping.
-    //
-    // We nevertheless halve the region we report, because:
-    //  - the two stacks grow at almost the same rate (measured ~1.016:1 in
-    //    favour of the register stack, which therefore exhausts first),
-    //  - Zero's stack overflow check (ZeroStack::abi_stack_available) only ever
-    //    measures the memory stack, and
-    //  - register stack overflow is fatal and cannot be reliably caught: on a
-    //    pthread the SIGSEGV handler does not run even with SA_ONSTACK.
-    // Halving makes the software check trip with the register stack still far
-    // from its limit. Do not remove this as an obsolete workaround.
-    int total_pages = align_down(*size, page_bytes) / page_bytes;
-    bottom += (total_pages - guard_pages) / 2 * page_bytes;
-#endif // IA64
-
     bottom += guard_bytes;
     *size = *base - bottom;
 
     pthread_attr_destroy(&attr);
   }
+
+#ifdef IA64
+  // IA-64 has two stacks: the memory stack growing downwards and the RSE
+  // register backing store growing upwards.
+  //
+  // Contrary to what the comment here used to claim, they are not two halves of
+  // one region meeting in the centre. pthread_attr_getstack() reports only the
+  // memory stack; the register backing store lives below it, and for the
+  // primordial thread in an entirely separate mapping.
+  //
+  // We nevertheless report only half the region, because:
+  //  - the two stacks grow at almost the same rate (measured ~1.016:1 in
+  //    favour of the register stack, which therefore exhausts first),
+  //  - Zero's stack overflow check (ZeroStack::abi_stack_available) only ever
+  //    measures the memory stack, and
+  //  - register stack overflow is fatal and cannot be reliably caught: on a
+  //    pthread the SIGSEGV handler does not run even with SA_ONSTACK.
+  // Halving makes the software check trip with the register stack still far
+  // from its limit. Do not remove this as an obsolete workaround.
+  //
+  // This must apply to the primordial thread as well, which takes the branch
+  // above and would otherwise be reported at full size -- deep recursion on the
+  // main thread then dies with SIGSEGV instead of throwing StackOverflowError.
+  size_t ia64_reserved = align_down(*size / 2, os::vm_page_size());
+  *size -= ia64_reserved;
+  bottom = *base - *size;
+#endif // IA64
 
   assert(os::current_stack_pointer() >= bottom &&
          os::current_stack_pointer() < *base, "just checking");
