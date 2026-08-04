@@ -2523,12 +2523,28 @@ void os::PageSizes::print_on(outputStream* st) const {
 // on. Space for libc guard pages is not included in this size.
 jint os::set_minimum_stack_sizes() {
 
+  // On IA-64 a thread's allocation is shared between the memory stack and the
+  // RSE register backing store, and only half of it is usable as memory stack
+  // (see os::current_stack_base_and_size). Every minimum computed here must
+  // therefore be doubled, or a thread can start with its guard and shadow zones
+  // already larger than its usable stack. That is not hypothetical: the JDK
+  // creates its "process reaper" thread with a 128K stack, and at IA-64's 16K
+  // page size the guard and shadow zones alone come to 192K, so the reaper died
+  // with StackOverflowError the moment it ran -- which left child processes
+  // unreaped and hung anything waiting on a subprocess.
+#ifdef IA64
+  const size_t min_stack_factor = 2;
+#else
+  const size_t min_stack_factor = 1;
+#endif
+
   _java_thread_min_stack_allowed = _java_thread_min_stack_allowed +
                                    StackOverflow::stack_guard_zone_size() +
                                    StackOverflow::stack_shadow_zone_size();
 
   _java_thread_min_stack_allowed = align_up(_java_thread_min_stack_allowed, vm_page_size());
   _java_thread_min_stack_allowed = MAX2(_java_thread_min_stack_allowed, _os_min_stack_allowed);
+  _java_thread_min_stack_allowed *= min_stack_factor;
 
   size_t stack_size_in_bytes = ThreadStackSize * K;
   if (stack_size_in_bytes != 0 &&
@@ -2553,6 +2569,7 @@ jint os::set_minimum_stack_sizes() {
 
   _compiler_thread_min_stack_allowed = align_up(_compiler_thread_min_stack_allowed, vm_page_size());
   _compiler_thread_min_stack_allowed = MAX2(_compiler_thread_min_stack_allowed, _os_min_stack_allowed);
+  _compiler_thread_min_stack_allowed *= min_stack_factor;
 
   stack_size_in_bytes = CompilerThreadStackSize * K;
   if (stack_size_in_bytes != 0 &&
@@ -2565,6 +2582,7 @@ jint os::set_minimum_stack_sizes() {
 
   _vm_internal_thread_min_stack_allowed = align_up(_vm_internal_thread_min_stack_allowed, vm_page_size());
   _vm_internal_thread_min_stack_allowed = MAX2(_vm_internal_thread_min_stack_allowed, _os_min_stack_allowed);
+  _vm_internal_thread_min_stack_allowed *= min_stack_factor;
 
   stack_size_in_bytes = VMThreadStackSize * K;
   if (stack_size_in_bytes != 0 &&
