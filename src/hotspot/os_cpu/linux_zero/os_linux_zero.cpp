@@ -353,14 +353,24 @@ void os::current_stack_base_and_size(address* base, size_t* size) {
     assert(guard_bytes == guard_pages * page_bytes, "unaligned guard");
 
 #ifdef IA64
-    // IA64 has two stacks sharing the same area of memory, a normal
-    // stack growing downwards and a register stack growing upwards.
-    // Guard pages, if present, are in the centre.  This code splits
-    // the stack in two even without guard pages, though in theory
-    // there's nothing to stop us allocating more to the normal stack
-    // or more to the register stack if one or the other were found
-    // to grow faster.
-    int total_pages = align_down(stack_bytes, page_bytes) / page_bytes;
+    // IA-64 has two stacks: the memory stack growing downwards and the RSE
+    // register backing store growing upwards.
+    //
+    // Contrary to what this comment used to claim, they are not two halves of
+    // one region meeting in the centre. pthread_attr_getstack() reports only
+    // the memory stack; the register backing store lives below it, and for the
+    // main thread in an entirely separate mapping.
+    //
+    // We nevertheless halve the region we report, because:
+    //  - the two stacks grow at almost the same rate (measured ~1.016:1 in
+    //    favour of the register stack, which therefore exhausts first),
+    //  - Zero's stack overflow check (ZeroStack::abi_stack_available) only ever
+    //    measures the memory stack, and
+    //  - register stack overflow is fatal and cannot be reliably caught: on a
+    //    pthread the SIGSEGV handler does not run even with SA_ONSTACK.
+    // Halving makes the software check trip with the register stack still far
+    // from its limit. Do not remove this as an obsolete workaround.
+    int total_pages = align_down(*size, page_bytes) / page_bytes;
     bottom += (total_pages - guard_pages) / 2 * page_bytes;
 #endif // IA64
 
