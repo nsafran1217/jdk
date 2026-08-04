@@ -31,12 +31,22 @@
 // runtime system.  See globals.hpp for details of what they do.
 //
 
+#ifdef IA64
+// IA-64 splits a thread's allocation between the memory stack and the RSE
+// register backing store (see os::current_stack_base_and_size), so only half of
+// what is requested is usable as memory stack. Ask for twice the usual figure
+// so the effective size matches the other 64-bit Linux ports, which use 1024
+// (x86), 2040 (aarch64) and 2048 (ppc, riscv).
+define_pd_global(intx,  ThreadStackSize,         4096);  // 2048 usable
+define_pd_global(intx,  VMThreadStackSize,       2048);  // 1024 usable
+#else
 define_pd_global(intx,  ThreadStackSize,         1536);
 #ifdef _LP64
 define_pd_global(intx,  VMThreadStackSize,       1024);
 #else
 define_pd_global(intx,  VMThreadStackSize,       512);
 #endif // _LP64
+#endif // IA64
 define_pd_global(intx,  CompilerThreadStackSize, 0);
 define_pd_global(size_t, JVMInvokeMethodSlack,   8192);
 
