@@ -92,6 +92,8 @@ address os::Posix::ucontext_get_pc(const ucontext_t* uc) {
     return (address)uc->uc_mcontext.arm_pc;
 #elif defined(AARCH64)
     return (address)uc->uc_mcontext.pc;
+#elif defined(IA64)
+    return (address)uc->uc_mcontext.sc_ip;
 #elif defined(PPC)
     return (address)uc->uc_mcontext.regs->nip;
 #elif defined(RISCV)
@@ -121,6 +123,8 @@ intptr_t* os::Linux::ucontext_get_sp(const ucontext_t* uc) {
     return (intptr_t*)uc->uc_mcontext.arm_sp;
 #elif defined(AARCH64)
     return (intptr_t*)uc->uc_mcontext.sp;
+#elif defined(IA64)
+    return (intptr_t*)uc->uc_mcontext.sc_gr[12/*REG_SP*/];
 #elif defined(PPC)
     return (intptr_t*)uc->uc_mcontext.regs->gpr[1/*REG_SP*/];
 #elif defined(RISCV)
@@ -146,6 +150,9 @@ intptr_t* os::Linux::ucontext_get_fp(const ucontext_t* uc) {
     return (intptr_t*)uc->uc_mcontext.arm_fp;
 #elif defined(AARCH64)
     return (intptr_t*)uc->uc_mcontext.regs[29 /* REG_FP */];
+#elif defined(IA64)
+    // IA-64 has no conventional frame pointer; unwinding is table-driven.
+    return nullptr;
 #elif defined(PPC)
     return nullptr;
 #elif defined(RISCV)
