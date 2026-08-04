@@ -43,6 +43,7 @@ public enum Architecture {
      */
     AARCH64(64, ByteOrder.LITTLE_ENDIAN),
     ARM(32, ByteOrder.LITTLE_ENDIAN),
+    IA64(64, ByteOrder.LITTLE_ENDIAN),
     LOONGARCH64(64, ByteOrder.LITTLE_ENDIAN),
     MIPSEL(32, ByteOrder.LITTLE_ENDIAN),
     MIPS64EL(64, ByteOrder.LITTLE_ENDIAN),
@@ -178,6 +179,14 @@ public enum Architecture {
     @ForceInline
     public static boolean isPPC64LE() {
         return PlatformProps.TARGET_ARCH_IS_PPC64LE;
+    }
+
+    /**
+     * {@return {@code true} if the current architecture is IA64}
+     */
+    @ForceInline
+    public static boolean isIA64() {
+        return PlatformProps.TARGET_ARCH_IS_IA64;
     }
 
     /**
