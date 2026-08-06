@@ -1,0 +1,60 @@
+/*
+ * Copyright (c) 2006, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2026, IA-64 port contributors. All rights reserved.
+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ *
+ * This code is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 only, as
+ * published by the Free Software Foundation.
+ *
+ * This code is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ * version 2 for more details (a copy is included in the LICENSE file that
+ * accompanied this code).
+ *
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ *
+ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+ * or visit www.oracle.com if you need additional information or have any
+ * questions.
+ *
+ */
+
+#ifndef CPU_IA64_VMREG_IA64_HPP
+#define CPU_IA64_VMREG_IA64_HPP
+
+// This file is included inside the body of VMRegImpl (see share/code/vmreg.hpp).
+//
+// The VMReg number space is [general registers][floating-point registers], two
+// slots per register. There is no vector class: IA-64 has no packed SIMD in the
+// FP register file (the parallel arithmetic instructions operate on the general
+// registers), so unlike cpu/riscv there is no max_vpr region.
+
+inline bool is_Register() {
+  return (unsigned int) value() < (unsigned int) ConcreteRegisterImpl::max_gpr;
+}
+
+inline bool is_FloatRegister() {
+  return value() >= ConcreteRegisterImpl::max_gpr && value() < ConcreteRegisterImpl::max_fpr;
+}
+
+inline Register as_Register() {
+  assert(is_Register(), "must be");
+  return ::as_Register(value() / Register::max_slots_per_register);
+}
+
+inline FloatRegister as_FloatRegister() {
+  assert(is_FloatRegister() && is_even(value()), "must be");
+  return ::as_FloatRegister((value() - ConcreteRegisterImpl::max_gpr) /
+                            FloatRegister::max_slots_per_register);
+}
+
+inline bool is_concrete() {
+  assert(is_reg(), "must be");
+  return is_even(value());
+}
+
+#endif // CPU_IA64_VMREG_IA64_HPP
