@@ -100,13 +100,9 @@ void VM_Version::initialize() {
   // and f0 (0.0) as identity operands -- so the hardware support is total. It
   // simply has no effect until there is a compiler to emit the intrinsic.
 
-  // Prefetching (lfetch) exists but no stub uses it yet.
+  // Prefetching (lfetch) exists but no stub uses it yet; see
+  // prefetch_linux_ia64.inline.hpp.
   FLAG_SET_DEFAULT(AllocatePrefetchDistance, 0);
-
-  // hs_err register/instruction context decoding is not wired up for IA-64
-  // yet; the ucontext accessors exist (carried over from the Zero port) but
-  // the disassembler does not.
-  UNSUPPORTED_OPTION(DecodeErrorContext);
 }
 
 void VM_Version::initialize_cpu_information(void) {
