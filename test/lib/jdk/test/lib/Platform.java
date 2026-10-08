@@ -66,6 +66,10 @@ public class Platform {
         return vmName.endsWith(" Minimal VM");
     }
 
+    public static boolean isCore() {
+        return vmName.endsWith(" Core VM");
+    }
+
     public static boolean isEmbedded() {
         return vmName.contains("Embedded");
     }
@@ -447,6 +451,8 @@ public class Platform {
             return "minimal";
         } else if (Platform.isZero()) {
             return "zero";
+        } else if (Platform.isCore()) {
+            return "core";
         } else {
             throw new Error("TESTBUG: unsupported vm variant");
         }
