@@ -194,6 +194,33 @@ inline Insn AndImm(uint32_t r1, int64_t imm8, uint32_t r3, uint32_t qp = 0) {
   return fOp(8) | fX2a(0) | fVe(0) | fX4(0xb) | fX2b(0) | fImm8(imm8) |
          fR3(r3) | fR1(r1) | fQp(qp);
 }
+inline bool is_simm8(int64_t v) { return -128 <= v && v < 128; }
+
+// The rest of the A3 family (binutils ia64-opc-a.c): x4 = 0xb selects the
+// logical ops by x2b, x4 = 9 / x2b = 1 is the reverse subtract. Note the
+// operand order: the immediate is the *first* source, so "sub r1 = imm8, r3"
+// computes imm8 - r3.
+inline Insn OrImm(uint32_t r1, int64_t imm8, uint32_t r3, uint32_t qp = 0) {
+  return fOp(8) | fX2a(0) | fVe(0) | fX4(0xb) | fX2b(2) | fImm8(imm8) |
+         fR3(r3) | fR1(r1) | fQp(qp);
+}
+inline Insn XorImm(uint32_t r1, int64_t imm8, uint32_t r3, uint32_t qp = 0) {
+  return fOp(8) | fX2a(0) | fVe(0) | fX4(0xb) | fX2b(3) | fImm8(imm8) |
+         fR3(r3) | fR1(r1) | fQp(qp);
+}
+inline Insn SubImm(uint32_t r1, int64_t imm8, uint32_t r3, uint32_t qp = 0) {
+  return fOp(8) | fX2a(0) | fVe(0) | fX4(9) | fX2b(1) | fImm8(imm8) |
+         fR3(r3) | fR1(r1) | fQp(qp);
+}
+
+// A2: shladd r1 = r2, count, r3  ->  r1 = (r2 << count) + r3, count 1..4.
+// The count is stored biased by one in bits 28:27 (binutils CNT2a). This is
+// the array-indexing instruction: base + index * element size in one go.
+inline Insn Shladd(uint32_t r1, uint32_t r2, uint32_t count, uint32_t r3, uint32_t qp = 0) {
+  assert(count >= 1 && count <= 4, "shladd count is 1..4");
+  return fOp(8) | fX2a(0) | fVe(0) | fX4(4) | (Insn((count - 1) & 0x3) << 27) |
+         fR3(r3) | fR2(r2) | fR1(r1) | fQp(qp);
+}
 
 // A4: r1 = imm14 + r3 ("adds"). Also the canonical register move when imm == 0,
 // which is how "mov r1 = r3" is encoded. IA-64 has no displacement addressing,
@@ -219,9 +246,12 @@ inline Insn fTb(uint32_t x) { return Insn(x & 0x1) << 36; }
 inline Insn fC(uint32_t x)  { return Insn(x & 0x1) << 12; }
 inline Insn fX2(uint32_t x) { return Insn(x & 0x3) << 34; }
 
+// x2 selects the width: 0 compares all 64 bits, 1 ("cmp4") only the low 32,
+// sign- or zero-extending them as the relation requires. cmp4 is what lets the
+// interpreter compare Java ints without first normalising the upper halves.
 inline Insn CmpA6(uint32_t op, uint32_t p1, uint32_t p2, uint32_t r2,
-                  uint32_t r3, uint32_t qp = 0) {
-  return fOp(op) | fTb(0) | fX2(0) | fTa(0) | fP2(p2) | fR3(r3) | fR2(r2) |
+                  uint32_t r3, uint32_t qp = 0, uint32_t x2 = 0) {
+  return fOp(op) | fTb(0) | fX2(x2) | fTa(0) | fP2(p2) | fR3(r3) | fR2(r2) |
          fC(0) | fP1(p1) | fQp(qp);
 }
 
@@ -238,6 +268,38 @@ inline Insn CmpLt(uint32_t p1, uint32_t p2, uint32_t r2, uint32_t r3, uint32_t q
 inline Insn CmpLtu(uint32_t p1, uint32_t p2, uint32_t r2, uint32_t r3, uint32_t qp = 0) {
   return CmpA6(0xd, p1, p2, r2, r3, qp);
 }
+
+inline Insn Cmp4Eq(uint32_t p1, uint32_t p2, uint32_t r2, uint32_t r3, uint32_t qp = 0) {
+  return CmpA6(0xe, p1, p2, r2, r3, qp, 1);
+}
+inline Insn Cmp4Ne(uint32_t p1, uint32_t p2, uint32_t r2, uint32_t r3, uint32_t qp = 0) {
+  return CmpA6(0xe, p2, p1, r2, r3, qp, 1);
+}
+inline Insn Cmp4Lt(uint32_t p1, uint32_t p2, uint32_t r2, uint32_t r3, uint32_t qp = 0) {
+  return CmpA6(0xc, p1, p2, r2, r3, qp, 1);
+}
+inline Insn Cmp4Ltu(uint32_t p1, uint32_t p2, uint32_t r2, uint32_t r3, uint32_t qp = 0) {
+  return CmpA6(0xd, p1, p2, r2, r3, qp, 1);
+}
+
+// A8: compare an 8-bit signed immediate against a register.
+//   cmp.rel p1, p2 = imm8, r3     -- note the immediate is the FIRST operand,
+// so "cmp.lt p1, p2 = 5, r3" tests 5 < r3. Same fields as A6 with the
+// immediate (fImm8: imm7b in 19:13, sign in 36) where r2 and tb were; x2 is 2
+// for the 64-bit form and 3 for cmp4.
+inline Insn CmpA8(uint32_t op, uint32_t p1, uint32_t p2, int64_t imm8,
+                  uint32_t r3, uint32_t qp, uint32_t x2) {
+  return fOp(op) | fX2(x2) | fTa(0) | fP2(p2) | fR3(r3) | fImm8(imm8) |
+         fC(0) | fP1(p1) | fQp(qp);
+}
+inline Insn CmpEqImm(uint32_t p1, uint32_t p2, int64_t imm8, uint32_t r3, uint32_t qp = 0)   { return CmpA8(0xe, p1, p2, imm8, r3, qp, 2); }
+inline Insn CmpNeImm(uint32_t p1, uint32_t p2, int64_t imm8, uint32_t r3, uint32_t qp = 0)   { return CmpA8(0xe, p2, p1, imm8, r3, qp, 2); }
+inline Insn CmpLtImm(uint32_t p1, uint32_t p2, int64_t imm8, uint32_t r3, uint32_t qp = 0)   { return CmpA8(0xc, p1, p2, imm8, r3, qp, 2); }
+inline Insn CmpLtuImm(uint32_t p1, uint32_t p2, int64_t imm8, uint32_t r3, uint32_t qp = 0)  { return CmpA8(0xd, p1, p2, imm8, r3, qp, 2); }
+inline Insn Cmp4EqImm(uint32_t p1, uint32_t p2, int64_t imm8, uint32_t r3, uint32_t qp = 0)  { return CmpA8(0xe, p1, p2, imm8, r3, qp, 3); }
+inline Insn Cmp4NeImm(uint32_t p1, uint32_t p2, int64_t imm8, uint32_t r3, uint32_t qp = 0)  { return CmpA8(0xe, p2, p1, imm8, r3, qp, 3); }
+inline Insn Cmp4LtImm(uint32_t p1, uint32_t p2, int64_t imm8, uint32_t r3, uint32_t qp = 0)  { return CmpA8(0xc, p1, p2, imm8, r3, qp, 3); }
+inline Insn Cmp4LtuImm(uint32_t p1, uint32_t p2, int64_t imm8, uint32_t r3, uint32_t qp = 0) { return CmpA8(0xd, p1, p2, imm8, r3, qp, 3); }
 
 // ---------------------------------------------------------------------------
 // M-type (memory) instructions, major opcode 4 (integer) / 6 (floating point).
@@ -272,6 +334,34 @@ inline Insn St1(uint32_t r3, uint32_t r2, uint32_t qp = 0) { return StoreM4(0x30
 inline Insn St2(uint32_t r3, uint32_t r2, uint32_t qp = 0) { return StoreM4(0x31, r3, r2, qp); }
 inline Insn St4(uint32_t r3, uint32_t r2, uint32_t qp = 0) { return StoreM4(0x32, r3, r2, qp); }
 inline Insn St8(uint32_t r3, uint32_t r2, uint32_t qp = 0) { return StoreM4(0x33, r3, r2, qp); }
+
+// M3 / M5: post-increment by a signed 9-bit immediate. The access uses the
+// address in r3 as-is and then adds imm9 to r3 -- the only addressing mode
+// IA-64 has beyond a bare register, and the natural way to walk the Java
+// expression stack. Major opcode 5, same x6a values as the plain forms.
+//   M3 (load):  imm9b = imm7b 19:13, i 27, s 36   (r1 is the destination)
+//   M5 (store): imm9a = imm7a 12:6,  i 27, s 36   (r2 is the source)
+inline bool is_simm9(int64_t v) { return -256 <= v && v < 256; }
+inline Insn fImm9b(int64_t v) {
+  return (Insn(v & 0x7f) << 13) | (Insn((v >> 7) & 1) << 27) | (Insn((v >> 8) & 1) << 36);
+}
+inline Insn fImm9a(int64_t v) {
+  return (Insn(v & 0x7f) << 6) | (Insn((v >> 7) & 1) << 27) | (Insn((v >> 8) & 1) << 36);
+}
+inline Insn LoadM3(uint32_t x6a, uint32_t r1, uint32_t r3, int64_t imm9, uint32_t qp = 0) {
+  return fOp(5) | fX6a(x6a) | fHint(0) | fImm9b(imm9) | fR3(r3) | fR1(r1) | fQp(qp);
+}
+inline Insn StoreM5(uint32_t x6a, uint32_t r3, uint32_t r2, int64_t imm9, uint32_t qp = 0) {
+  return fOp(5) | fX6a(x6a) | fHint(0) | fImm9a(imm9) | fR3(r3) | fR2(r2) | fQp(qp);
+}
+inline Insn Ld1Inc(uint32_t r1, uint32_t r3, int64_t imm9, uint32_t qp = 0) { return LoadM3(0x00, r1, r3, imm9, qp); }
+inline Insn Ld2Inc(uint32_t r1, uint32_t r3, int64_t imm9, uint32_t qp = 0) { return LoadM3(0x01, r1, r3, imm9, qp); }
+inline Insn Ld4Inc(uint32_t r1, uint32_t r3, int64_t imm9, uint32_t qp = 0) { return LoadM3(0x02, r1, r3, imm9, qp); }
+inline Insn Ld8Inc(uint32_t r1, uint32_t r3, int64_t imm9, uint32_t qp = 0) { return LoadM3(0x03, r1, r3, imm9, qp); }
+inline Insn St1Inc(uint32_t r3, uint32_t r2, int64_t imm9, uint32_t qp = 0) { return StoreM5(0x30, r3, r2, imm9, qp); }
+inline Insn St2Inc(uint32_t r3, uint32_t r2, int64_t imm9, uint32_t qp = 0) { return StoreM5(0x31, r3, r2, imm9, qp); }
+inline Insn St4Inc(uint32_t r3, uint32_t r2, int64_t imm9, uint32_t qp = 0) { return StoreM5(0x32, r3, r2, imm9, qp); }
+inline Insn St8Inc(uint32_t r3, uint32_t r2, int64_t imm9, uint32_t qp = 0) { return StoreM5(0x33, r3, r2, imm9, qp); }
 
 // ld8.fill / st8.spill -- the NaT-preserving general-register forms.
 //
@@ -659,6 +749,25 @@ inline Insn Czx2R(uint32_t r1, uint32_t r3, uint32_t qp = 0) { return ExtendI29(
 // I9: popcnt.
 inline Insn Popcnt(uint32_t r1, uint32_t r3, uint32_t qp = 0) {
   return fOp(7) | fZa(0) | fZb(1) | fVeI(0) | fX2a(1) | fX2bI(1) | fX2c(2) | fR3(r3) | fR1(r1) | fQp(qp);
+}
+
+// I16: tbit.z p1, p2 = r3, pos -- p1 = (bit pos of r3 == 0), p2 = !p1.
+// op 5, x2 (35:34) = 0, ta 33, tb 36, ya 13, c 12 all zero for the plain
+// .z form; p2 32:27, r3 26:20, pos6 19:14, p1 11:6. tbit.nz is the same
+// instruction with p1 and p2 exchanged.
+inline Insn TbitZ(uint32_t p1, uint32_t p2, uint32_t r3, uint32_t pos, uint32_t qp = 0) {
+  return fOp(5) | fX2(0) | fTa(0) | fTb(0) | fYa(0) | fC(0) | fP2(p2) | fR3(r3) |
+         (Insn(pos & 0x3f) << 14) | fP1(p1) | fQp(qp);
+}
+inline Insn TbitNz(uint32_t p1, uint32_t p2, uint32_t r3, uint32_t pos, uint32_t qp = 0) {
+  return TbitZ(p2, p1, r3, pos, qp);
+}
+
+// I25: mov r1 = ip -- the address of the bundle containing this instruction.
+// op 0, x3 (35:33) = 0, x6 (32:27) = 0x30. Exact and position-independent,
+// which is how set_last_Java_frame records the pc without a relocation.
+inline Insn MovFromIp(uint32_t r1, uint32_t qp = 0) {
+  return fOp(0) | fX3(0) | fX6b(0x30) | fR1(r1) | fQp(qp);
 }
 
 // I3: mux1. Shares the major-7 field layout; the third operand carries the
