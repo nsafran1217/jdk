@@ -31,24 +31,29 @@
 
 // Native method calls.
 //
-// Note for the implementation (JIT-SCOPE.md phase 5): the psABI numbers
-// arguments positionally 1-8, and each position has BOTH a general slot
-// (out0-out7) and a floating-point slot (f8-f15). An argument uses whichever
-// matches its type but consumes both, so an FP argument in position N leaves
-// out(N-1) unused. Tracking only one counter is the classic way to get this
-// wrong. cpu/ppc's and the SpiderMonkey backend's ABIArgGenerator both
-// implement the rule correctly and are worth reading first.
+// The generated handler copies a native method's Java arguments into the C
+// argument positions the psABI prescribes. The rule (LLVM's
+// CC_IA64_FP_Common, GCC's ia64_function_arg) has two counters, and keeping
+// them apart is the whole difficulty:
 //
-// The generated handler must also be preceded by a {entry, gp} function
-// descriptor so C++ can call it by pointer, exactly as
-// interpreterRT_ppc.cpp:140 patches one in for PPC64 ELFv1.
+//  - every argument consumes the next of eight positional GR slots,
+//    out0-out7, whatever its type; beyond eight, 8-byte stack slots from
+//    sp+16 (above the psABI scratch area);
+//  - a floating-point argument within the first eight slots travels in the
+//    next *unused FP register*, f8-f15 in order of FP arguments -- not in
+//    f(8 + slot) -- leaving its GR slot unused.
+//
+// Slot 0 is the JNIEnv*; for a static method slot 1 is the class mirror.
+//
+// The handler is called from generated code (the native entry), never from
+// C++, so unlike PPC64 ELFv1 it needs no function descriptor in front of it.
 
 class SignatureHandlerGenerator: public NativeSignatureIterator {
  private:
   MacroAssembler* _masm;
-  unsigned int _num_reg_fp_args;
-  unsigned int _num_reg_int_args;
-  int _stack_offset;
+  unsigned int _next_slot;      // next positional GR slot, 0-7, then stack
+  unsigned int _num_fp_regs;    // FP argument registers used so far
+  int _stack_offset;            // next stack slot, from sp
 
   void pass_int();
   void pass_long();
@@ -56,9 +61,9 @@ class SignatureHandlerGenerator: public NativeSignatureIterator {
   void pass_double();
   void pass_object();
 
-  Register next_gpr();
-  FloatRegister next_fpr();
-  int next_stack_offset();
+  // Claims the next positional slot: its out register, or noreg when the
+  // slot is on the stack (in which case *stack_off says where).
+  Register next_slot(int* stack_off);
 
  public:
   // Creation
