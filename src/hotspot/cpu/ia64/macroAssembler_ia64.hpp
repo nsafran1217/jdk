@@ -425,6 +425,8 @@ class MacroAssembler : public Assembler {
 
   // result = *result, for an OopHandle.
   void resolve_oop_handle(Register result, Register tmp1 = noreg, Register tmp2 = noreg);
+  // value = the oop a (possibly tagged, possibly null) jobject refers to.
+  void resolve_jobject(Register value, Register tmp1 = noreg, Register tmp2 = noreg);
 
   void load_method_holder(Register holder, Register method);
   void load_mirror(Register dst, Register method, Register tmp1 = noreg, Register tmp2 = noreg);

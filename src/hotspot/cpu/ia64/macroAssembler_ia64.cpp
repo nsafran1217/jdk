@@ -32,6 +32,7 @@
 #include "oops/klass.hpp"
 #include "runtime/safepointMechanism.hpp"
 #include "runtime/javaThread.hpp"
+#include "runtime/jniHandles.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/stubRoutines.hpp"
 #include "utilities/globalDefinitions.hpp"
@@ -555,6 +556,18 @@ void MacroAssembler::store_heap_oop(Address dst, Register val, Register tmp1,
 
 void MacroAssembler::resolve_oop_handle(Register result, Register tmp1, Register tmp2) {
   access_load_at(T_OBJECT, IN_NATIVE, result, Address(result, 0), tmp1, tmp2);
+}
+
+void MacroAssembler::resolve_jobject(Register value, Register tmp1, Register tmp2) {
+  // The collectors built so far (Serial, Parallel, Epsilon) need no barrier
+  // on any kind of handle, so every tag resolves the same way: strip it and
+  // load. The weak and global cases diverge once G1 or ZGC arrive.
+  Label done;
+  beqz(value, done);                                    // use null as-is
+  STATIC_ASSERT(JNIHandles::tag_mask == 3);
+  and_imm(value, ~JNIHandles::tag_mask, value);
+  access_load_at(T_OBJECT, IN_NATIVE, value, Address(value, 0), tmp1, tmp2);
+  bind(done);
 }
 
 void MacroAssembler::load_method_holder(Register holder, Register method) {
