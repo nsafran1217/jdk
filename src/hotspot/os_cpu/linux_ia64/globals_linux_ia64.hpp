@@ -49,11 +49,9 @@ define_pd_global(size_t, JVMInvokeMethodSlack,    8192);
 
 // Used on 64 bit platforms for UseCompressedOops base address.
 //
-// Note this hint is not honoured on IA-64 Linux, which hands out high mmap
-// addresses; milestone 1 accordingly runs with -XX:-UseCompressedOops
-// -XX:-UseCompressedClassPointers (FRAME-DESIGN.md section 2.4). The value is
-// kept at the conventional 2 GiB so that enabling compressed oops later is a
-// one-flag change rather than a hunt for why the base is wrong.
+// IA-64 Linux honours low mmap hints, so the conventional 2 GiB gives the
+// unscaled and zero-based modes. cpu/ia64 does not implement compressed oops
+// yet and turns them off in VM_Version::early_initialize.
 define_pd_global(size_t, HeapBaseMinAddress,      2 * G);
 
 #endif // OS_CPU_LINUX_IA64_GLOBALS_LINUX_IA64_HPP
