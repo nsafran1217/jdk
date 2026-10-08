@@ -61,15 +61,22 @@ class InterpreterMacroAssembler: public MacroAssembler {
   // Interpreter specific version of call_VM_base
   using MacroAssembler::call_VM_leaf_base;
 
+  // IA-64: these must really override MacroAssembler's (hence `override`).
+  // riscv declares its call_VM_leaf_base without the retaddr parameter, so it
+  // silently does not override and MacroAssembler::call_VM_leaf never reaches
+  // it -- harmless there, where xlocals is callee-saved, but here it skipped
+  // reloading Rlocals after every leaf call (seen on rx2800 as `this` reading
+  // null after an f2i in HashMap.resize).
   virtual void call_VM_leaf_base(address entry_point,
-                                 int number_of_arguments);
+                                 int number_of_arguments,
+                                 Label* retaddr = nullptr) override;
 
   virtual void call_VM_base(Register oop_result,
                             Register java_thread,
                             Register last_java_sp,
                             address  entry_point,
                             int number_of_arguments,
-                            bool check_exceptions);
+                            bool check_exceptions) override;
 
   // base routine for all dispatches
   void dispatch_base(TosState state, address* table, bool verifyoop = true,

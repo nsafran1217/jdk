@@ -65,10 +65,13 @@ class MacroAssembler : public Assembler {
 
   // ---- alignment ---------------------------------------------------------
 
-  // Pad with whole nop bundles. modulus must be a multiple of the bundle size:
-  // there is no way to advance the instruction stream by less than 16 bytes.
+  // Pad with whole nop bundles. There is no way to advance the instruction
+  // stream by less than 16 bytes, and it is always bundle-aligned, so any
+  // smaller power-of-two alignment (shared code asks for wordSize) already
+  // holds.
   void align(int modulus) {
-    assert(modulus % BytesPerBundle == 0, "must be a multiple of the bundle size");
+    assert(modulus % BytesPerBundle == 0 || BytesPerBundle % modulus == 0,
+           "alignment must divide, or be a multiple of, the bundle size");
     while (offset() % modulus != 0) { nop(); }
   }
 
@@ -167,6 +170,43 @@ class MacroAssembler : public Assembler {
   // Pointer-sized aliases, for code shaped like the other ports.
   void ld_ptr(Register dst, const Address& a)                 { ld8(dst, a); }
   void st_ptr(const Address& a, Register src, Register tmp = t0) { st8(a, src, tmp); }
+
+  // ---- immediates of any width ---------------------------------------------
+  //
+  // The A-unit compare-immediate and logical-immediate forms take a signed
+  // 8-bit immediate only. These hide the Assembler forms and fall back to
+  // materialising a wider constant in t1 -- so they clobber t1 when (and only
+  // when) the immediate does not fit. Bytecode numbers above 127 are the
+  // common case that needs it.
+#define IMM8_OR_REG_CMP(name, regform)                                                           \
+  void name(PredicateRegister p1, PredicateRegister p2, int64_t imm, Register r3,                \
+            PredicateRegister qp = pTrue) {                                                       \
+    if (ia64::is_simm8(imm)) { Assembler::name(p1, p2, imm, r3, qp); return; }                    \
+    assert_different_registers(r3, t1);                                                           \
+    mov_immediate(t1, imm);                                                                       \
+    regform(p1, p2, t1, r3, qp);                                                                  \
+  }
+  IMM8_OR_REG_CMP(cmp_eq_imm,   cmp_eq)
+  IMM8_OR_REG_CMP(cmp_ne_imm,   cmp_ne)
+  IMM8_OR_REG_CMP(cmp_lt_imm,   cmp_lt)
+  IMM8_OR_REG_CMP(cmp_ltu_imm,  cmp_ltu)
+  IMM8_OR_REG_CMP(cmp4_eq_imm,  cmp4_eq)
+  IMM8_OR_REG_CMP(cmp4_ne_imm,  cmp4_ne)
+  IMM8_OR_REG_CMP(cmp4_lt_imm,  cmp4_lt)
+  IMM8_OR_REG_CMP(cmp4_ltu_imm, cmp4_ltu)
+#undef IMM8_OR_REG_CMP
+
+#define IMM8_OR_REG_LOGIC(name, regform)                                                         \
+  void name(Register r1, int64_t imm, Register r3, PredicateRegister qp = pTrue) {               \
+    if (ia64::is_simm8(imm)) { Assembler::name(r1, imm, r3, qp); return; }                        \
+    assert_different_registers(r3, t1);                                                           \
+    mov_immediate(t1, imm);                                                                       \
+    regform(r1, t1, r3, qp);                                                                      \
+  }
+  IMM8_OR_REG_LOGIC(and_imm, and_)
+  IMM8_OR_REG_LOGIC(or_imm,  or_)
+  IMM8_OR_REG_LOGIC(xor_imm, xor_)
+#undef IMM8_OR_REG_LOGIC
 
   // ---- compare and branch ------------------------------------------------
   //

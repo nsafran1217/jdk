@@ -31,6 +31,8 @@
 
 class VM_Version : public Abstract_VM_Version {
  public:
+  // Runs before argument parsing and ergonomics.
+  static void early_initialize();
   static void initialize();
 
   constexpr static bool supports_stack_watermark_barrier() { return true; }

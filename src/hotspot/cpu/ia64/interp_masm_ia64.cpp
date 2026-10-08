@@ -899,7 +899,8 @@ void InterpreterMacroAssembler::restore_interpreter_state_after_call() {
 }
 
 void InterpreterMacroAssembler::call_VM_leaf_base(address entry_point,
-                                                  int number_of_arguments) {
+                                                  int number_of_arguments,
+                                                  Label* retaddr) {
   // interpreter specific
   //
   // Rbcp is preserved by the C ABI (r6), and no blocking or GC can happen in
@@ -915,7 +916,7 @@ void InterpreterMacroAssembler::call_VM_leaf_base(address entry_point,
   }
 #endif /* ASSERT */
   // super call
-  MacroAssembler::call_VM_leaf_base(entry_point, number_of_arguments);
+  MacroAssembler::call_VM_leaf_base(entry_point, number_of_arguments, retaddr);
   restore_interpreter_state_after_call();
 }
 

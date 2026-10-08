@@ -29,7 +29,25 @@
 #include "runtime/os.hpp"
 #include "runtime/vm_version.hpp"
 
+// Milestone 1 runs without compressed oops (FRAME-DESIGN.md 2.4): the barrier
+// code and the templates load and store full-width oops. The decision must be
+// made before ergonomics, which sizes heap oops (heapOopSize) from the flag:
+// switching it off any later leaves C++ laying out object arrays with 4-byte
+// elements that generated code reads as 8 -- observed on rx2800 as a pair of
+// narrow oops (0x12806c48_12806c20) dereferenced as one pointer. Marking the
+// flag as set (FLAG_SET_ERGO) stops Arguments::set_use_compressed_oops from
+// turning it back on; an explicit -XX:+UseCompressedOops still wins, and
+// initialize() refuses it.
+void VM_Version::early_initialize() {
+  FLAG_SET_ERGO(UseCompressedOops, false);
+}
+
 void VM_Version::initialize() {
+  if (UseCompressedOops) {
+    vm_exit_during_initialization("Compressed oops are not yet supported on IA-64",
+                                  "run with -XX:-UseCompressedOops");
+  }
+
   // IA-64 traps on unaligned access rather than fixing it up in hardware. The
   // kernel can emulate the trap, but at a cost that makes it worse than the
   // split accesses HotSpot emits when it knows alignment is not guaranteed.
