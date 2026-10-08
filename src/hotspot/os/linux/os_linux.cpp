@@ -5361,6 +5361,20 @@ void os::current_stack_base_and_size(address* base, size_t* size) {
 
     pthread_attr_destroy(&attr);
   }
+#ifdef IA64
+  // IA-64 threads also have a register backing store, which grows upward
+  // from below the memory stack pthread_attr_getstack() reports. Generated
+  // code never grows it (it executes a single alloc, in call_stub), but the
+  // C++ runtime it calls into does, and running out of it is fatal: the
+  // SIGSEGV handler does not run, even with SA_ONSTACK. Reporting only the
+  // upper half of the memory stack keeps the guard zones -- and so
+  // StackOverflowError -- well clear of it. The Zero port does the same in
+  // os_linux_zero.cpp; see the reasoning and measurements there and in
+  // tools/gate/FINDINGS.md.
+  size_t ia64_reserved = align_down(*size / 2, os::vm_page_size());
+  *size -= ia64_reserved;
+  bottom = *base - *size;
+#endif // IA64
   assert(os::current_stack_pointer() >= bottom &&
          os::current_stack_pointer() < *base, "just checking");
 }
