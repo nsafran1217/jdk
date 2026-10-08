@@ -477,6 +477,9 @@ class MacroAssembler : public Assembler {
   // non-zero base.
   void load_klass(Register dst, Register src);
   void decode_klass_not_null(Register r);
+  void encode_klass_not_null(Register dst, Register src);   // clobbers t1 if base != 0
+  void tlab_allocate(Register obj, Register var_size_in_bytes, int con_size_in_bytes,
+                     Register tmp1, Register tmp2, Label& slow_case);
 
   // Branch to L_success if sub_klass is a subtype of super_klass, else fall
   // through. The fast path checks the primary-supers display and the

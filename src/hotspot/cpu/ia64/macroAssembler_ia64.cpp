@@ -596,6 +596,29 @@ void MacroAssembler::decode_klass_not_null(Register r) {
   }
 }
 
+// Bump-pointer allocation in the current thread's TLAB; see
+// BarrierSetAssembler::tlab_allocate. Clobbers t1.
+void MacroAssembler::tlab_allocate(Register obj, Register var_size_in_bytes, int con_size_in_bytes,
+                                   Register tmp1, Register tmp2, Label& slow_case) {
+  BarrierSetAssembler* bs = BarrierSet::barrier_set()->barrier_set_assembler();
+  bs->tlab_allocate(this, obj, var_size_in_bytes, con_size_in_bytes, tmp1, tmp2, slow_case);
+}
+
+// dst = the narrow klass for the (non-null) Klass* in src. src is preserved.
+void MacroAssembler::encode_klass_not_null(Register dst, Register src) {
+  assert(UseCompressedClassPointers, "should only be used for compressed headers");
+  if (CompressedKlassPointers::base() != nullptr) {
+    assert_different_registers(src, t1);
+    movl(t1, (address)CompressedKlassPointers::base());
+    sub(dst, src, t1);
+  } else {
+    mov(dst, src);
+  }
+  if (CompressedKlassPointers::shift() != 0) {
+    shru_imm(dst, dst, CompressedKlassPointers::shift());
+  }
+}
+
 void MacroAssembler::load_klass(Register dst, Register src) {
   assert(!UseCompactObjectHeaders, "IA-64: compact object headers not yet supported");
   if (UseCompressedClassPointers) {

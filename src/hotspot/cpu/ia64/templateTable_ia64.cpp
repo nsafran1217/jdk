@@ -3301,15 +3301,97 @@ void TemplateTable::invokedynamic(int byte_no) {
 //-----------------------------------------------------------------------------
 // Allocation
 
-// IA-64 milestone 1: always the runtime path. riscv's inline TLAB fast path
-// depends on fast class-initialization checks (clinit_barrier), which this
-// port does not claim yet; InterpreterRuntime::_new is correct, if slower.
+// The TLAB fast path, after riscv's -- except for the class-initialization
+// check. riscv uses clinit_barrier, which needs
+// VM_Version::supports_fast_class_init_checks(); claiming that would also make
+// the shared resolution code rely on fast init checks in invokestatic and
+// get/putstatic, which this port does not implement. Instead the fast path is
+// taken only when the class is fully_initialized, read with acquire semantics
+// as InstanceKlass::init_state() does; every other state, including "being
+// initialized by this thread", takes the runtime path, which is always correct.
 void TemplateTable::_new() {
   transition(vtos, atos);
+
+  Label slow_case;
+  Label done;
+  Label initialize_header;
+
+  const Register Rindex = R13;   // cp index, then instance size in bytes
+  const Register Rcp    = R12;   // the ConstantPool*
+  const Register Rklass = R14;   // the InstanceKlass*
+  const Register Rfield = R16;   // field-zeroing cursor
+  const Register Rend   = R15;   // tlab_allocate's new top
+
+  if (UseTLAB && !DTraceAllocProbes) {
+    __ get_unsigned_2_byte_index_at_bcp(Rindex, 1);
+    __ get_cpool_and_tags(Rcp, Rtos);              // Rtos = tags (vtos: free)
+
+    // Make sure the class we're about to instantiate has been resolved. The
+    // tag is read before the resolved klass, as ConstantPool::klass_at_put
+    // publishes them in that order (acquire).
+    const int tags_offset = Array<u1>::base_offset_in_bytes();
+    __ add(t0, Rtos, Rindex);
+    __ ld1(t0, Address(t0, tags_offset));
+    __ membar(MacroAssembler::LoadLoad | MacroAssembler::LoadStore);
+    __ cmp_ne_imm(ptmp0, ptmp1, JVM_CONSTANT_Class, t0);
+    __ br_cond(slow_case, ptmp0);
+
+    __ load_resolved_klass_at_offset(Rcp, Rindex, Rklass, t0);
+
+    // Make sure the klass is fully initialized (acquire, so that this thread
+    // also sees everything <clinit> wrote).
+    __ ld1(t0, Address(Rklass, InstanceKlass::init_state_offset()));
+    __ membar(MacroAssembler::LoadLoad | MacroAssembler::LoadStore);
+    __ cmp_ne_imm(ptmp0, ptmp1, InstanceKlass::fully_initialized, t0);
+    __ br_cond(slow_case, ptmp0);
+
+    // Get instance_size from the layout helper (a positive byte count for an
+    // instance klass), and take the slow path if the klass asks for it
+    // (finalizers, abstract/interface, Class, ...).
+    __ ld4(Rindex, Address(Rklass, Klass::layout_helper_offset()));
+    __ and_imm(t0, Klass::_lh_instance_slow_path_bit, Rindex);
+    __ bnez(t0, slow_case);
+
+    // Allocate in the TLAB, or go to the slow path.
+    __ tlab_allocate(Rtos, Rindex, 0, noreg, Rend, slow_case);
+
+    if (!ZeroTLAB) {
+      // Zero the fields, 8 bytes at a time (instance sizes are multiples of
+      // HeapWordSize). If there are none, go straight to the header.
+      __ adds(Rindex, -(int)sizeof(oopDesc), Rindex);
+      __ beqz(Rindex, initialize_header);
+      __ adds(Rfield, (int)sizeof(oopDesc), Rtos);
+      Label loop;
+      __ bind(loop);
+      __ st8_inc(Rfield, zr, BytesPerLong);
+      __ adds(Rindex, -BytesPerLong, Rindex);
+      __ bnez(Rindex, loop);
+    }
+
+    // Initialize the header: prototype mark word, then the klass.
+    __ bind(initialize_header);
+    assert(!UseCompactObjectHeaders, "IA-64: compact object headers not yet supported");
+    __ mov(t0, (int64_t)markWord::prototype().value());
+    __ st8(Address(Rtos, oopDesc::mark_offset_in_bytes()), t0, t1);
+    if (UseCompressedClassPointers) {
+      __ st4(Address(Rtos, oopDesc::klass_gap_offset_in_bytes()), zr, t1);
+      __ encode_klass_not_null(t0, Rklass);
+      __ st4(Address(Rtos, oopDesc::klass_offset_in_bytes()), t0, t1);
+    } else {
+      __ st8(Address(Rtos, oopDesc::klass_offset_in_bytes()), Rklass, t1);
+    }
+    __ br(done);
+  }
+
+  // slow case
+  __ bind(slow_case);
   __ get_constant_pool(c_rarg1);
   __ get_unsigned_2_byte_index_at_bcp(c_rarg2, 1);
   call_VM(Rtos, CAST_FROM_FN_PTR(address, InterpreterRuntime::_new), c_rarg1, c_rarg2);
   __ verify_oop(Rtos);
+
+  // continue
+  __ bind(done);
   // Must prevent reordering of stores for object initialization with stores that publish the new object.
   __ membar(MacroAssembler::StoreStore);
 }
