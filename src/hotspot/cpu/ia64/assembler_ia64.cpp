@@ -25,6 +25,12 @@
 #include "asm/assembler.hpp"
 #include "asm/assembler.inline.hpp"
 
+// The byte used to pad code. A zero bundle is an MII bundle of three
+// break 0 instructions, so stray execution of padding traps.
+int AbstractAssembler::code_fill_byte() {
+  return 0;
+}
+
 static uint8_t bundle_template(const ia64::Bundle* b) {
   return (uint8_t)(b->lo & 0x1f);
 }
