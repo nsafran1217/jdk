@@ -665,6 +665,26 @@ static void javaSignalHandler(int sig, siginfo_t* info, void* context) {
   (void)JVM_HANDLE_XXX_SIGNAL(sig, info, context, true);
 }
 
+#ifdef IA64
+// Linux/IA-64 does not save the preserved registers r4-r7 in the signal
+// context, and the IA-64 template interpreter keeps fp and its bytecode and
+// expression-stack pointers there. The VM's handlers are therefore entered
+// through assembly stubs (os_cpu/linux_ia64/signalEntry_linux_ia64.S) that
+// copy r4-r7 into the context and then branch to the handler below.
+static void SR_handler(int sig, siginfo_t* siginfo, void* context);
+extern "C" {
+  void ia64_javaSignalHandler_entry(int sig, siginfo_t* info, void* context);
+  void ia64_SR_handler_entry(int sig, siginfo_t* info, void* context);
+  sa_sigaction_t ia64_javaSignalHandler_target = javaSignalHandler;
+  sa_sigaction_t ia64_SR_handler_target = SR_handler;
+}
+#define JAVA_SIGNAL_HANDLER_ENTRY ia64_javaSignalHandler_entry
+#define SR_HANDLER_ENTRY          ia64_SR_handler_entry
+#else
+#define JAVA_SIGNAL_HANDLER_ENTRY javaSignalHandler
+#define SR_HANDLER_ENTRY          SR_handler
+#endif
+
 static void UserHandler(int sig, siginfo_t* siginfo, void* context) {
 
   PosixSignals::unblock_error_signals();
@@ -1255,7 +1275,7 @@ static void set_signal_handler(int sig) {
   // from installing a new handler since we need to honor AllowUserSignalHandlers.
   void* oldhand = get_signal_handler(&oldAct);
   if (!HANDLER_IS_IGN_OR_DFL(oldhand) &&
-      !HANDLER_IS(oldhand, javaSignalHandler)) {
+      !HANDLER_IS(oldhand, JAVA_SIGNAL_HANDLER_ENTRY)) {
     if (AllowUserSignalHandlers) {
       // Do not overwrite; user takes responsibility to forward to us.
       return;
@@ -1272,7 +1292,7 @@ static void set_signal_handler(int sig) {
 
   struct sigaction sigAct;
   int ret = PosixSignals::install_sigaction_signal_handler(&sigAct, &oldAct,
-                                                           sig, javaSignalHandler);
+                                                           sig, JAVA_SIGNAL_HANDLER_ENTRY);
   assert(ret == 0, "check");
 
   // Save handler setup for possible later checking
@@ -1753,7 +1773,7 @@ static int SR_initialize() {
 
   // Set up signal handler for suspend/resume
   act.sa_flags = SA_RESTART|SA_SIGINFO;
-  act.sa_sigaction = SR_handler;
+  act.sa_sigaction = SR_HANDLER_ENTRY;
 
   // SR_signum is blocked when the handler runs.
   pthread_sigmask(SIG_BLOCK, nullptr, &act.sa_mask);

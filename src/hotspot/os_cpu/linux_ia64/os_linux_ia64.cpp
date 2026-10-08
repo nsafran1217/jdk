@@ -76,7 +76,10 @@
 // * sc_gr[] holds only the static registers r0-r31; the stacked registers
 //   live in the register backing store. That is enough, because everything
 //   HotSpot needs from generated code is static: fp = r4, Rbcp = r6,
-//   sp = r12 (FRAME-DESIGN.md 2.2).
+//   sp = r12 (FRAME-DESIGN.md 2.2). But the kernel does not save the
+//   preserved r4-r7 at all (a C handler preserves them anyway); the VM's
+//   handlers are entered through signalEntry_linux_ia64.S, which fills them
+//   in. A context from any other handler has garbage in sc_gr[4..7].
 // * sc_ip carries the slot number of the interrupted instruction in its low
 //   two bits (the kernel stores cr_iip + psr.ri, arch/ia64/kernel/signal.c).
 //   A faulting M-unit load -- slot 0 in this port's one-instruction bundles
@@ -85,6 +88,11 @@
 //   bundle-aligned continuation resumes at slot 0.
 // * C frames keep no fp chain (unwinding is table-driven), so a C frame
 //   cannot be walked by link() the way riscv walks it.
+
+// sc_gr[4..7] are only meaningful because signalEntry_linux_ia64.S stores
+// r4-r7 there before the VM's handlers run; the kernel leaves them out of the
+// signal context. That file hard-codes this offset.
+STATIC_ASSERT(offsetof(ucontext_t, uc_mcontext.sc_gr[4]) == 0xe8);
 
 #define IA64_REG_FP   4   // fp, HotSpot's frame linkage
 #define IA64_REG_BCP  6   // Rbcp
