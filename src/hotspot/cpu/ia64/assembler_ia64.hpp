@@ -524,7 +524,11 @@ class Assembler : public AbstractAssembler {
   void fadd_d(FloatRegister f1, FloatRegister f3, FloatRegister f2, QP) { emit_f(ia64::FaddD(f1->encoding(), f3->encoding(), f2->encoding(), ia64::sf0, Q)); }
   void fsub_d(FloatRegister f1, FloatRegister f3, FloatRegister f2, QP) { emit_f(ia64::FsubD(f1->encoding(), f3->encoding(), f2->encoding(), ia64::sf0, Q)); }
   void fmpy_d(FloatRegister f1, FloatRegister f3, FloatRegister f4, QP) { emit_f(ia64::FmpyD(f1->encoding(), f3->encoding(), f4->encoding(), ia64::sf0, Q)); }
-  void fmov_d(FloatRegister f1, FloatRegister f3, QP)                   { emit_f(ia64::FmovD(f1->encoding(), f3->encoding(), Q)); }
+  // f1 = f3, an exact copy of the 82-bit register (fmerge.s f1 = f3, f3; GNU
+  // as's "mov f1 = f3"). Not fnorm: normalising to double format would turn a
+  // float denormal's register image into a normal value with an exponent below
+  // the single range, which stfs then packs wrongly (exponent off by 2^128).
+  void fmov(FloatRegister f1, FloatRegister f3, QP)                     { emit_f(ia64::FmergeS(f1->encoding(), f3->encoding(), f3->encoding(), Q)); }
 
   // Single precision rounds to IEEE single (the .s completer): Java float
   // arithmetic needs it on every operation, since registers are 82 bits.
@@ -533,6 +537,32 @@ class Assembler : public AbstractAssembler {
   void fmpy_s(FloatRegister f1, FloatRegister f3, FloatRegister f4, QP) { emit_f(ia64::FmpyS(f1->encoding(), f3->encoding(), f4->encoding(), ia64::sf0, Q)); }
   void fnorm_s(FloatRegister f1, FloatRegister f3, QP)                  { emit_f(ia64::FnormS(f1->encoding(), f3->encoding(), ia64::sf0, Q)); }
   void fnorm_d(FloatRegister f1, FloatRegister f3, QP)                  { emit_f(ia64::FnormD(f1->encoding(), f3->encoding(), ia64::sf0, Q)); }
+  // Explicit-status-field forms, for multi-step sequences (the inline divide)
+  // whose intermediate steps run on sf1. Linux starts every process with sf1
+  // set to widest-range exponent, extended precision, round-to-nearest and
+  // traps disabled (measured: tools/gate/fpsrprobe.c), which is what the
+  // published IA-64 division algorithms assume. fma / fnma round to the
+  // status field's precision (extended); fma_s / fma_d to IEEE single/double.
+  void fma(FloatRegister f1, FloatRegister f3, FloatRegister f4, FloatRegister f2, ia64::FpSf sf, QP) {
+    emit_f(ia64::Fma(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), sf, Q));
+  }
+  void fnma(FloatRegister f1, FloatRegister f3, FloatRegister f4, FloatRegister f2, ia64::FpSf sf, QP) {
+    emit_f(ia64::Fnma(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), sf, Q));
+  }
+  void fma_s(FloatRegister f1, FloatRegister f3, FloatRegister f4, FloatRegister f2, ia64::FpSf sf, QP) {
+    emit_f(ia64::FmaS(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), sf, Q));
+  }
+  void fma_d(FloatRegister f1, FloatRegister f3, FloatRegister f4, FloatRegister f2, ia64::FpSf sf, QP) {
+    emit_f(ia64::FmaD(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), sf, Q));
+  }
+  // f1 ~= f2 / f3 (a reciprocal approximation of f3, scaled), p2 = whether the
+  // software Newton-Raphson sequence must refine it. p2 is cleared when f1 is
+  // already the IEEE result (zeros, infinities, NaNs, and the cases the
+  // kernel's floating-point software assist completes), so every refinement
+  // step is predicated on p2.
+  void frcpa(FloatRegister f1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP) {
+    emit_f(ia64::Frcpa(f1->encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q));
+  }
   // f1 = f3 with its sign inverted: exact, and NaN-preserving.
   void fneg(FloatRegister f1, FloatRegister f3, QP)                     { emit_f(ia64::FmergeNs(f1->encoding(), f3->encoding(), f3->encoding(), Q)); }
   // f1 = the 64-bit signed integer in f2's significand, as a floating value

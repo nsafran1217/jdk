@@ -280,8 +280,8 @@ void TemplateTable::lconst(int value) {
 void TemplateTable::fconst(int value) {
   transition(vtos, ftos);
   switch (value) {
-    case 0: __ fmov_d(Ftos, f0);       break;
-    case 1: __ fmov_d(Ftos, f1);       break;
+    case 0: __ fmov(Ftos, f0);       break;
+    case 1: __ fmov(Ftos, f1);       break;
     case 2: __ fadd_s(Ftos, f1, f1);   break;
     default: ShouldNotReachHere();
   }
@@ -290,8 +290,8 @@ void TemplateTable::fconst(int value) {
 void TemplateTable::dconst(int value) {
   transition(vtos, dtos);
   switch (value) {
-    case 0: __ fmov_d(Ftos, f0);       break;
-    case 1: __ fmov_d(Ftos, f1);       break;
+    case 0: __ fmov(Ftos, f0);       break;
+    case 1: __ fmov(Ftos, f1);       break;
     default: ShouldNotReachHere();
   }
 }
@@ -1243,9 +1243,6 @@ static jint  ia64_irem(jint x, jint y)   { return (x == min_jint && y == -1) ? 0
 static jlong ia64_ldiv(jlong x, jlong y) { return (x == min_jlong && y == -1) ? x : x / y; }
 static jlong ia64_lrem(jlong x, jlong y) { return (x == min_jlong && y == -1) ? 0 : x % y; }
 
-// IA-64: no FP divide instruction either; GCC's IEEE-correct sequence via C.
-static jfloat  ia64_fdiv(jfloat x, jfloat y)   { return x / y; }
-static jdouble ia64_ddiv(jdouble x, jdouble y) { return x / y; }
 
 void TemplateTable::iop2(Operation op) {
   transition(itos, itos);
@@ -1386,12 +1383,12 @@ void TemplateTable::fop2(Operation op) {
       __ fmpy_s(Ftos, f9, Ftos);
       break;
     case div:
-      __ fmov_d(f9, Ftos);
-      __ pop_f(Ftos);
-      __ call_VM_leaf(CAST_FROM_FN_PTR(address, ia64_fdiv));
+      // No FP divide instruction: frcpa + Newton-Raphson, inline.
+      __ pop_f(f9);
+      __ fdiv_s(Ftos, f9, Ftos);
       break;
     case rem:
-      __ fmov_d(f9, Ftos);
+      __ fmov(f9, Ftos);
       __ pop_f(Ftos);
       __ call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::frem));
       break;
@@ -1416,12 +1413,12 @@ void TemplateTable::dop2(Operation op) {
       __ fmpy_d(Ftos, f9, Ftos);
       break;
     case div:
-      __ fmov_d(f9, Ftos);
-      __ pop_d(Ftos);
-      __ call_VM_leaf(CAST_FROM_FN_PTR(address, ia64_ddiv));
+      // No FP divide instruction: frcpa + Newton-Raphson, inline.
+      __ pop_d(f9);
+      __ fdiv_d(Ftos, f9, Ftos);
       break;
     case rem:
-      __ fmov_d(f9, Ftos);
+      __ fmov(f9, Ftos);
       __ pop_d(Ftos);
       __ call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::drem));
       break;

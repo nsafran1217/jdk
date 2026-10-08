@@ -754,3 +754,44 @@ void MacroAssembler::safepoint_poll(Label& slow_path, bool at_return, bool acqui
     br_cond(slow_path, ptmp0);
   }
 }
+
+// ---- floating-point division ------------------------------------------------
+//
+// Register-format temporaries throughout: the intermediate steps carry no
+// precision completer, so they round to sf1's precision (extended) with its
+// widened exponent range, and only the last step rounds to the result format,
+// on sf0 so the user-visible flags and rounding mode apply. Every step after
+// frcpa is predicated on ptmp0; when frcpa clears it, y already holds a / b
+// and the final predicated fma leaves it alone. Names follow div.md.
+
+void MacroAssembler::fdiv_s(FloatRegister dst, FloatRegister a, FloatRegister b) {
+  const FloatRegister y = f10, e = f11, y1 = f12, y2 = f13;
+  assert_different_registers(a, b, y, e, y1, y2);
+  const PredicateRegister p = ptmp0;
+  frcpa(y, p, a, b);                       // y  = 1 / b, approximately
+  fnma (e,  b,  y, f1,   ia64::sf1, p);    // e  = 1 - (b * y)
+  fma  (y1, y,  e, y,    ia64::sf1, p);    // y1 = y + (y * e)
+  fma  (y2, y1, e, y,    ia64::sf1, p);    // y2 = y + (y1 * e)
+  const FloatRegister q = y1, r = e;       // y1 and e are dead from here
+  fma_s(q,  a,  y2, f0,  ia64::sf1, p);    // q  = single(a * y2)
+  fnma (r,  q,  b,  a,   ia64::sf1, p);    // r  = a - (q * b)
+  fma_s(y,  r,  y2, q,   ia64::sf0, p);    // Q  = single(q + (r * y2)), else y
+  fmov(dst, y);
+}
+
+void MacroAssembler::fdiv_d(FloatRegister dst, FloatRegister a, FloatRegister b) {
+  const FloatRegister y = f10, e = f11, yn = f12, q = f13, r = f14;
+  assert_different_registers(a, b, y, e, yn, q, r);
+  const PredicateRegister p = ptmp0;
+  frcpa(y, p, a, b);                       // y  = 1 / b, approximately
+  fnma (e,  b,  y,  f1,  ia64::sf1, p);    // e  = 1 - (b * y)
+  fma  (yn, y,  e,  y,   ia64::sf1, p);    // y1 = y + (y * e)
+  fma  (e,  e,  e,  f0,  ia64::sf1, p);    // e1 = e * e
+  fma  (yn, yn, e,  yn,  ia64::sf1, p);    // y2 = y1 + (y1 * e1)
+  fma  (e,  e,  e,  f0,  ia64::sf1, p);    // e2 = e1 * e1
+  fma  (yn, yn, e,  yn,  ia64::sf1, p);    // y3 = y2 + (y2 * e2)
+  fma_d(q,  a,  yn, f0,  ia64::sf1, p);    // q  = double(a * y3)
+  fnma (r,  b,  q,  a,   ia64::sf1, p);    // r  = a - (b * q)
+  fma_d(y,  r,  yn, q,   ia64::sf0, p);    // Q  = double(q + (r * y3)), else y
+  fmov(dst, y);
+}

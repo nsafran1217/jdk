@@ -506,6 +506,18 @@ class MacroAssembler : public Assembler {
   void safepoint_poll(Label& slow_path, bool at_return, bool acquire, bool in_nmethod,
                       Register tmp = t1);
 
+  // ---- floating-point division ---------------------------------------------
+  //
+  // IA-64 has no divide instruction. dst = a / b, correctly rounded to IEEE
+  // single / double as Java requires: frcpa's reciprocal approximation refined
+  // by Newton-Raphson on sf1, then one rounding step on sf0. These are GCC's
+  // maximum-throughput sequences (gcc/config/ia64/div.md, divsf3_internal_thr
+  // and divdf3_internal_thr), i.e. Intel's published IEEE-correct algorithms;
+  // special operands (frcpa clears ptmp0) take frcpa's own result. dst may be
+  // a or b. Clobbers f10-f13 (fdiv_s) or f10-f14 (fdiv_d) and ptmp0.
+  void fdiv_s(FloatRegister dst, FloatRegister a, FloatRegister b);
+  void fdiv_d(FloatRegister dst, FloatRegister a, FloatRegister b);
+
   // ---- debugging -----------------------------------------------------------
 
   void should_not_reach_here() { stop("should not reach here"); }

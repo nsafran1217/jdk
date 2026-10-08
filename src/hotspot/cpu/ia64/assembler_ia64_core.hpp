@@ -842,6 +842,8 @@ inline Insn FaddS(uint32_t f1, uint32_t f3, uint32_t f2, uint32_t sf = sf0, uint
 inline Insn FsubS(uint32_t f1, uint32_t f3, uint32_t f2, uint32_t sf = sf0, uint32_t qp = 0)  { return FmsS(f1, f3, fpOne, f2, sf, qp); }
 inline Insn FmpyS(uint32_t f1, uint32_t f3, uint32_t f4, uint32_t sf = sf0, uint32_t qp = 0)  { return FmaS(f1, f3, f4, fpZero, sf, qp); }
 inline Insn FnormS(uint32_t f1, uint32_t f3, uint32_t sf = sf0, uint32_t qp = 0)              { return FmaS(f1, f3, fpOne, fpZero, sf, qp); }
+// NOT a register move: fnorm.d, which rounds to double and normalises. Moving
+// a float denormal through it corrupts it (see Assembler::fmov, the exact copy).
 inline Insn FmovD(uint32_t f1, uint32_t f3, uint32_t qp = 0)                                  { return FnormD(f1, f3, sf0, qp); }
 
 // F6/F11: conversions. Major opcode 0, xb (bit 33) = 0, x6 -> 32:27.
