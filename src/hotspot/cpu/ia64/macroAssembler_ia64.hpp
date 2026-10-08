@@ -517,10 +517,13 @@ class MacroAssembler : public Assembler {
   // message.
   void stop(const char* msg);
 
-  // Linux/IA-64 (arch/ia64/kernel/traps.c, ia64_bad_break) delivers break
-  // immediates in [0x40000, 0x80000) as SIGILL with si_code __ILL_BREAK,
-  // distinct from break 0 (GCC's __builtin_trap) and break 1 (integer divide
-  // by zero, SIGFPE). [UNVERIFIED on rx2800 -- from the Linux source.]
+  // A break.b's immediate never reaches the kernel: measured on rx2800
+  // (tools/gate/breakprobe.c), every break.b arrives as SIGILL/ILL_ILLOPC,
+  // the same as break 0 (GCC's __builtin_trap). The SIGILL handler therefore
+  // recognises a stop by the bundle at the pc (is_stop), never by si_code;
+  // the immediate only marks the bundle. (break.m immediates are reported:
+  // [0x40000, 0x80000) as SIGILL/__ILL_BREAK, >= 0x80000 as SIGTRAP, and
+  // 0x100000 is the system-call break -- never emit it.)
   static const uint32_t stop_break_imm = 0x40000 | 0x5709;
   // pc may carry a slot number in its low bits, as the kernel reports it.
   static bool is_stop(address pc);

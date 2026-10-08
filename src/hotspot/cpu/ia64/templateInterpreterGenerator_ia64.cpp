@@ -1471,31 +1471,87 @@ void TemplateInterpreterGenerator::set_vtos_entry_points(Template* t,
 
 // Non-product code. Bytecode tracing, counting and histograms are all
 // diagnostic flags that are off by default; their code is only generated
-// when one is turned on, and on IA-64 it traps for now.
+// when one is turned on.
+//
+// These run at the start of every template, with the template's tos_in value
+// still live in Rtos/Ftos, so they touch only the MacroAssembler temporaries
+// t0-t3 (none of which is a tos register). The counters are plain
+// load/add/store, not atomic -- as on x86, they are diagnostic tallies and a
+// lost update between threads does not matter.
 #ifndef PRODUCT
+// Tracing is expanded inline in each template (trace_bytecode) rather than
+// called as a shared per-state subroutine as on riscv: the call into the VM
+// clobbers every branch and scratch register, and only r4-r7 survive it --
+// all four already taken -- so a subroutine would have to spill its own
+// return address to memory. Inline expansion only costs code size, and only
+// with -XX:+TraceBytecodes. No port code reads Interpreter::trace_code().
 address TemplateInterpreterGenerator::generate_trace_code(TosState state) {
-  address entry = __ pc();
-  __ unimplemented("IA-64: TraceBytecodes");
-  return entry;
+  return nullptr;
 }
 
 void TemplateInterpreterGenerator::count_bytecode() {
-  __ unimplemented("IA-64: CountBytecodes");
+  __ movl(t0, (address) &BytecodeCounter::_counter_value);
+  __ ld8(t1, t0);
+  __ adds(t1, 1, t1);
+  __ st8(t0, t1);
 }
 
 void TemplateInterpreterGenerator::histogram_bytecode(Template* t) {
-  __ unimplemented("IA-64: PrintBytecodeHistogram");
+  __ movl(t0, (address) &BytecodeHistogram::_counters[t->bytecode()]);
+  __ ld4(t1, t0);
+  __ adds(t1, 1, t1);
+  __ st4(t0, t1);
 }
 
 void TemplateInterpreterGenerator::histogram_bytecode_pair(Template* t) {
-  __ unimplemented("IA-64: PrintBytecodePairHistogram");
+  // Calculate new index for counter:
+  //   _index = (_index >> log2_number_of_codes) |
+  //            (bytecode << log2_number_of_codes);
+  // _index is never negative, so ld4's zero extension and a logical shift
+  // match the C++ int arithmetic.
+  __ movl(t0, (address) &BytecodePairHistogram::_index);
+  __ ld4(t1, t0);
+  __ shru_imm(t1, t1, BytecodePairHistogram::log2_number_of_codes);
+  __ mov_immediate(t2, ((int)t->bytecode()) << BytecodePairHistogram::log2_number_of_codes);
+  __ or_(t1, t1, t2);
+  __ st4(t0, t1);
+  // Bump bucket contents:
+  //   _counters[_index] ++;
+  __ movl(t2, (address) BytecodePairHistogram::_counters);
+  __ shladd(t2, t1, LogBytesPerInt, t2);
+  __ ld4(t3, t2);
+  __ adds(t3, 1, t3);
+  __ st4(t2, t3);
 }
 
 void TemplateInterpreterGenerator::trace_bytecode(Template* t) {
-  __ unimplemented("IA-64: TraceBytecodes");
+  // Spill the cached tos so the VM call cannot clobber it and so the tracer
+  // sees it as the top expression-stack element; reload it afterwards.
+  // call_VM saves Rbcp in the frame (BytecodeTracer reads it from there) and
+  // reloads Rlocals, Rmethod and Rcpool on return.
+  const TosState state = t->tos_in();
+  __ push(state);
+  __ mov(c_rarg1, zr);       // preserve_this_value: unused by the interpreter
+  __ load_ptr(0, c_rarg2);   // tos
+  __ load_ptr(1, c_rarg3);   // tos2
+  __ call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::trace_bytecode),
+             c_rarg1, c_rarg2, c_rarg3, false /* check_exceptions */);
+  __ pop(state);
 }
 
 void TemplateInterpreterGenerator::stop_interpreter_at() {
-  __ unimplemented("IA-64: StopInterpreterAt");
+  // Trap once BytecodeCounter reaches StopInterpreterAt, as x86's int3 does.
+  // A break.b arrives as SIGILL whatever its immediate (measured,
+  // tools/gate/breakprobe.c; see MacroAssembler::stop_break_imm), so this
+  // stops a debugger, or without one ends in an hs_err at this pc. The
+  // immediate differs from stop_break_imm so is_stop() does not claim it.
+  Label L;
+  __ movl(t0, (address) &BytecodeCounter::_counter_value);
+  __ ld8(t1, t0);
+  __ mov_immediate(t2, StopInterpreterAt);
+  __ cmp_eq(ptmp0, ptmp1, t1, t2);
+  __ br_cond(L, ptmp1);
+  __ brk(0x80000 | 0x5709);
+  __ bind(L);
 }
 #endif // !PRODUCT
