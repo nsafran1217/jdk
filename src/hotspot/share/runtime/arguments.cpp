@@ -2928,8 +2928,11 @@ jint Arguments::finalize_vm_init_args() {
     set_mode_flags(_int);
   }
 
-#ifdef ZERO
-  // Zero always runs in interpreted mode
+#if !COMPILER1_OR_COMPILER2 && !INCLUDE_JVMCI
+  // A VM built without compilers (Zero, or the core variant) always runs in
+  // interpreted mode. Without this, an explicit -XX:+TieredCompilation put the
+  // core variant in mixed mode, and CompilationPolicy::initialize divided by a
+  // compiler buffer size that is zero when no compiler is built.
   set_mode_flags(_int);
 #endif
 
