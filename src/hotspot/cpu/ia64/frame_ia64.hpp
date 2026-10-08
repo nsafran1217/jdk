@@ -108,11 +108,11 @@
 
     // Entry frames
     // n.b. these values are determined by the layout call_stub lays down in
-    // stubGenerator_ia64.cpp and MUST be changed together with it. The IA-64
-    // save area is larger than most ports' because f2-f5 and f16-f31 are saved
-    // with stf.spill, 16 bytes each rather than 8. See FRAME-DESIGN.md 5.2.
-    // TODO: fix these two up when call_stub is written (JIT-SCOPE.md phase 3).
-    entry_frame_after_call_words                     =  62,
+    // stubGenerator_ia64.cpp (call_stub_layout) and MUST be changed together
+    // with it; generate_call_stub asserts they agree. The IA-64 save area is
+    // larger than most ports' because f2-f5 and f16-f31 are saved with
+    // stf.spill, 16 bytes each rather than 8. See FRAME-DESIGN.md 5.2.
+    entry_frame_after_call_words                     =  61,
     entry_frame_call_wrapper_offset                  = -10,
 
     // we don't need a save area
