@@ -100,6 +100,8 @@ class MacroAssembler : public Assembler {
   // fit adds' 14 bits.
   void add_imm(Register dst, Register src, int64_t imm, Register tmp = t0);
   void sub_imm(Register dst, Register src, int64_t imm, Register tmp = t0) { add_imm(dst, src, -imm, tmp); }
+  // dst = -src (64-bit). sub_imm above hides Assembler's reverse subtract.
+  void neg(Register dst, Register src) { Assembler::sub_imm(dst, 0, src); }
 
   // dst = src * imm. Powers of two shift; anything else goes through the FP
   // unit's xma.l (IA-64 integer units have no multiplier), using ftmp0/ftmp1
@@ -447,6 +449,17 @@ class MacroAssembler : public Assembler {
   void check_klass_subtype_slow_path(Register sub_klass, Register super_klass,
                                      Register tmp1, Register tmp2,
                                      Label* L_success, Label* L_failure);
+
+  // method_result = recv_klass->vtable()[vtable_index].method().
+  void lookup_virtual_method(Register recv_klass, Register vtable_index, Register method_result);
+
+  // Find intf_klass among recv_klass's itable entries; on a miss branch to
+  // L_no_such_interface. With return_method, also load the method at
+  // itable_index (a register, which must be method_result) into
+  // method_result; recv_klass is then destroyed. Clobbers scan_tmp and t0.
+  void lookup_interface_method(Register recv_klass, Register intf_klass, Register itable_index,
+                               Register method_result, Register scan_tmp,
+                               Label& L_no_such_interface, bool return_method = true);
 
   // Thread-local safepoint poll. at_return compares against the stack
   // watermark (fp, or sp in an nmethod) instead of testing the poll bit.

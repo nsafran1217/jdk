@@ -29,7 +29,8 @@
 #include "gc/shared/barrierSet.hpp"
 #include "gc/shared/barrierSetAssembler.hpp"
 #include "oops/compressedKlass.inline.hpp"
-#include "oops/klass.hpp"
+#include "oops/klass.inline.hpp"
+#include "oops/klassVtable.hpp"
 #include "runtime/safepointMechanism.hpp"
 #include "runtime/javaThread.hpp"
 #include "runtime/jniHandles.hpp"
@@ -676,6 +677,67 @@ void MacroAssembler::check_klass_subtype(Register sub_klass, Register super_klas
   check_klass_subtype_fast_path(sub_klass, super_klass, tmp1, &L_success, &L_failure, nullptr);
   check_klass_subtype_slow_path(sub_klass, super_klass, tmp1, tmp2, &L_success, nullptr);
   bind(L_failure);
+}
+
+void MacroAssembler::lookup_virtual_method(Register recv_klass, Register vtable_index, Register method_result) {
+  const ByteSize base = Klass::vtable_start_offset();
+  assert(vtableEntry::size() * wordSize == 8, "adjust the scaling in the code below");
+  int vtable_offset_in_bytes = in_bytes(base + vtableEntry::method_offset());
+  shladd(method_result, vtable_index, LogBytesPerWord, recv_klass);
+  ld8(method_result, Address(method_result, vtable_offset_in_bytes));
+}
+
+void MacroAssembler::lookup_interface_method(Register recv_klass, Register intf_klass, Register itable_index,
+                                             Register method_result, Register scan_tmp,
+                                             Label& L_no_such_interface, bool return_method) {
+  assert_different_registers(recv_klass, intf_klass, scan_tmp, t0);
+  assert_different_registers(method_result, intf_klass, scan_tmp, t0);
+  assert(recv_klass != method_result || !return_method,
+         "recv_klass can be destroyed when method isn't needed");
+  assert(!return_method || itable_index == method_result,
+         "caller must use same register for non-constant itable index as for method");
+
+  // Compute start of first itableOffsetEntry (which is at the end of the vtable).
+  int vtable_base = in_bytes(Klass::vtable_start_offset());
+  int itentry_off = in_bytes(itableMethodEntry::method_offset());
+  int scan_step   = itableOffsetEntry::size() * wordSize;
+  int vte_size    = vtableEntry::size_in_bytes();
+  assert(vte_size == wordSize, "else adjust times_vte_scale");
+
+  ld4(scan_tmp, Address(recv_klass, Klass::vtable_length_offset()));
+
+  // Could store the aligned, prescaled offset in the klass.
+  shladd(scan_tmp, scan_tmp, LogBytesPerWord, recv_klass);
+  add_imm(scan_tmp, scan_tmp, vtable_base);
+
+  if (return_method) {
+    // Adjust recv_klass by scaled itable_index, so we can free itable_index.
+    assert(itableMethodEntry::size() * wordSize == wordSize, "adjust the scaling in the code below");
+    shladd(recv_klass, itable_index, LogBytesPerWord, recv_klass);
+    add_imm(recv_klass, recv_klass, itentry_off);
+  }
+
+  Label search, found_method;
+
+  ld8(method_result, Address(scan_tmp, itableOffsetEntry::interface_offset()));
+  beq(intf_klass, method_result, found_method);
+  bind(search);
+  // Check that the previous entry is non-null. A null entry means that
+  // the receiver class doesn't implement the interface, and wasn't the
+  // same as when the caller was compiled.
+  beqz(method_result, L_no_such_interface);
+  add_imm(scan_tmp, scan_tmp, scan_step);
+  ld8(method_result, Address(scan_tmp, itableOffsetEntry::interface_offset()));
+  bne(intf_klass, method_result, search);
+
+  bind(found_method);
+
+  // Got a hit.
+  if (return_method) {
+    ld4(scan_tmp, Address(scan_tmp, itableOffsetEntry::offset_offset()));
+    add(method_result, recv_klass, scan_tmp);
+    Assembler::ld8(method_result, method_result);
+  }
 }
 
 void MacroAssembler::safepoint_poll(Label& slow_path, bool at_return, bool acquire, bool in_nmethod, Register tmp) {

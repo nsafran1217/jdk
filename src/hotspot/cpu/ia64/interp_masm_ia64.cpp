@@ -50,15 +50,19 @@
 
 // Derived from cpu/riscv/interp_masm_riscv.cpp. The register mapping is
 // riscv x10 -> Rtos (r8), f10 -> Ftos (f8), xbcp/xlocals/esp/xcpool/xmethod
-// -> Rbcp/Rlocals/Resp/Rcpool/Rmethod, and riscv's x11-x15 scratch -> r20-r24
-// (j_rarg0-4, free inside the interpreter). Departures that are about IA-64
-// rather than renaming are marked "IA-64:".
+// -> Rbcp/Rlocals/Resp/Rcpool/Rmethod, and riscv's scratch x1N -> r2N
+// (x11 -> r21 ... x17 -> r27; j_rarg registers, free inside the
+// interpreter). The same mapping is used by templateTable_ia64.cpp and
+// templateInterpreterGenerator_ia64.cpp, so the three files compare line for
+// line with riscv's. Departures that are about IA-64 rather than renaming are
+// marked "IA-64:".
 
 // Interpreter-internal scratch (see the mapping note above).
-static constexpr Register Rscratch1 = r20;
-static constexpr Register Rscratch2 = r21;
-static constexpr Register Rscratch3 = r22;
-static constexpr Register Rscratch4 = r23;
+static constexpr Register Rscratch1 = r21;   // riscv x11
+static constexpr Register Rscratch2 = r22;   // riscv x12
+static constexpr Register Rscratch3 = r23;   // riscv x13
+static constexpr Register Rscratch4 = r24;   // riscv x14
+static constexpr Register Rscratch5 = r25;   // riscv x15
 
 void InterpreterMacroAssembler::narrow(Register result) {
   assert_different_registers(result, Rscratch1, Rscratch2);
@@ -245,16 +249,16 @@ void InterpreterMacroAssembler::load_resolved_klass_at_offset(
 //      Rsub_klass: subklass
 //
 // Kills:
-//      Rscratch2, Rscratch3, t0, t1, ptmp0/1
+//      r22 (riscv x12), r25 (riscv x15), t0, t1, ptmp0/1
 void InterpreterMacroAssembler::gen_subtype_check(Register Rsub_klass,
                                                   Label& ok_is_subtype) {
-  assert_different_registers(Rsub_klass, Rtos, Rscratch2, Rscratch3);
+  assert_different_registers(Rsub_klass, Rtos, Rscratch2, Rscratch5);
 
   // Profile the not-null value's klass.
-  profile_typecheck(Rscratch2, Rsub_klass, Rscratch3);
+  profile_typecheck(Rscratch2, Rsub_klass, Rscratch5);
 
   // Do the check.
-  check_klass_subtype(Rsub_klass, Rtos, Rscratch2, Rscratch3, ok_is_subtype);
+  check_klass_subtype(Rsub_klass, Rtos, Rscratch2, Rscratch5, ok_is_subtype);
 }
 
 // Java Expression Stack

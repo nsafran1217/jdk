@@ -86,19 +86,21 @@
 // reports the shortfall at startup.
 int TemplateInterpreter::InterpreterCodeSize = 1536 * K;
 
-// Interpreter-internal scratch registers (j_rarg0-7 are free here).
-static constexpr Register Rconst_method = r21;
-static constexpr Register Rconstants    = r22;
-static constexpr Register Rsize_params  = r23;
-static constexpr Register Rextra_locals = r24;
-static constexpr Register Rtmp1         = r25;
-static constexpr Register Rtmp2         = r26;
-static constexpr Register Rtmp3         = r27;
+// Interpreter-internal scratch registers, following the riscv x1N -> r2N
+// mapping of interp_masm_ia64.cpp where riscv names a register for the role.
+static constexpr Register Rconst_method = r25;   // riscv x15_const_method
+static constexpr Register Rconstants    = r30;   // riscv x28_constants
+static constexpr Register Rsize_params  = r22;   // riscv x12
+static constexpr Register Rextra_locals = r23;   // riscv x13
+static constexpr Register Rtmp1         = r26;
+static constexpr Register Rtmp2         = r27;
+static constexpr Register Rtmp3         = r31;
 
 // The ArrayIndexOutOfBounds handler's register convention, shared with
-// TemplateTable::index_check (riscv: x11 / x13).
+// TemplateTable::index_check: riscv x11 / x13, i.e. r21 / r23 under the
+// x1N -> r2N mapping (interp_masm_ia64.cpp).
 static constexpr Register Raioobe_index = r21;
-static constexpr Register Raioobe_array = r22;
+static constexpr Register Raioobe_array = r23;
 
 // IA-64: words kept free below an expression stack or argument area for the
 // psABI scratch area of any C callee.

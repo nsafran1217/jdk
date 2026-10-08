@@ -526,6 +526,26 @@ class Assembler : public AbstractAssembler {
   void fmpy_d(FloatRegister f1, FloatRegister f3, FloatRegister f4, QP) { emit_f(ia64::FmpyD(f1->encoding(), f3->encoding(), f4->encoding(), ia64::sf0, Q)); }
   void fmov_d(FloatRegister f1, FloatRegister f3, QP)                   { emit_f(ia64::FmovD(f1->encoding(), f3->encoding(), Q)); }
 
+  // Single precision rounds to IEEE single (the .s completer): Java float
+  // arithmetic needs it on every operation, since registers are 82 bits.
+  void fadd_s(FloatRegister f1, FloatRegister f3, FloatRegister f2, QP) { emit_f(ia64::FaddS(f1->encoding(), f3->encoding(), f2->encoding(), ia64::sf0, Q)); }
+  void fsub_s(FloatRegister f1, FloatRegister f3, FloatRegister f2, QP) { emit_f(ia64::FsubS(f1->encoding(), f3->encoding(), f2->encoding(), ia64::sf0, Q)); }
+  void fmpy_s(FloatRegister f1, FloatRegister f3, FloatRegister f4, QP) { emit_f(ia64::FmpyS(f1->encoding(), f3->encoding(), f4->encoding(), ia64::sf0, Q)); }
+  void fnorm_s(FloatRegister f1, FloatRegister f3, QP)                  { emit_f(ia64::FnormS(f1->encoding(), f3->encoding(), ia64::sf0, Q)); }
+  void fnorm_d(FloatRegister f1, FloatRegister f3, QP)                  { emit_f(ia64::FnormD(f1->encoding(), f3->encoding(), ia64::sf0, Q)); }
+  // f1 = f3 with its sign inverted: exact, and NaN-preserving.
+  void fneg(FloatRegister f1, FloatRegister f3, QP)                     { emit_f(ia64::FmergeNs(f1->encoding(), f3->encoding(), f3->encoding(), Q)); }
+  // f1 = the 64-bit signed integer in f2's significand, as a floating value
+  // (exact in register format; round with fnorm_s / fnorm_d after).
+  void fcvt_xf(FloatRegister f1, FloatRegister f2, QP)                  { emit_f(ia64::FcvtXf(f1->encoding(), f2->encoding(), Q)); }
+  // p1 = relation, p2 = !relation; an unordered operand makes eq/lt/le false.
+  void fcmp_eq(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpEq(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q)); }
+  void fcmp_lt(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpLt(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q)); }
+  void fcmp_unord(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP) { emit_f(ia64::FcmpUnord(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q)); }
+
+  // r1 = r2 with its eight bytes reversed.
+  void mux1_rev(Register r1, Register r2, QP) { emit_i(ia64::Mux1(r1->encoding(), r2->encoding(), ia64::kMux1Rev, Q)); }
+
   void getf_d(Register r1, FloatRegister f2, QP)   { emit_m(ia64::GetfD(r1->encoding(), f2->encoding(), Q)); }
   void setf_d(FloatRegister f1, Register r2, QP)   { emit_m(ia64::SetfD(f1->encoding(), r2->encoding(), Q)); }
   void getf_s(Register r1, FloatRegister f2, QP)   { emit_m(ia64::GetfS(r1->encoding(), f2->encoding(), Q)); }
