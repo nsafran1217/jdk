@@ -91,7 +91,10 @@ class MacroAssembler : public Assembler {
     }
   }
   void mov(Register dst, int64_t imm) { mov_immediate(dst, imm); }
-  void mov(Register dst, Register src) { if (dst != src) Assembler::mov(dst, src); }
+  // A register move, elided when it would be a self-move.
+  void mov(Register dst, Register src, PredicateRegister qp = pTrue) {
+    if (dst != src) Assembler::mov(dst, src, qp);
+  }
 
   // dst = src + imm, for any imm. Uses tmp (default t0) only when imm does not
   // fit adds' 14 bits.
@@ -120,6 +123,22 @@ class MacroAssembler : public Assembler {
   void lea(Register dst, const Address& adr);
 
   // ---- loads and stores through an Address --------------------------------
+  //
+  // The bare-register forms (ld8(dst, reg), st8(reg, src), ...) remain
+  // available alongside these; Address's constructor is explicit, so the two
+  // can never be confused by an implicit conversion.
+  using Assembler::ld1;
+  using Assembler::ld2;
+  using Assembler::ld4;
+  using Assembler::ld8;
+  using Assembler::st1;
+  using Assembler::st2;
+  using Assembler::st4;
+  using Assembler::st8;
+  using Assembler::ldfs;
+  using Assembler::ldfd;
+  using Assembler::stfs;
+  using Assembler::stfd;
   //
   // Loads compute the address into their own destination, so they need no
   // scratch register. Stores need one for the address; t0 by default. The
@@ -437,9 +456,20 @@ class MacroAssembler : public Assembler {
   void should_not_reach_here() { stop("should not reach here"); }
   // Used by the shared TemplateTable for bytecodes a port has not provided.
   void unimplemented(const char* what = "");
-  // Trap with a message. The message address is materialised into a
-  // register the signal handler knows (see os_linux_ia64.cpp), then break.b.
+  // Trap with a message: a break.b with stop_break_imm, followed by a data
+  // bundle holding the message pointer. The SIGILL handler
+  // (os_linux_ia64.cpp) recognises the bundle with is_stop() and reports the
+  // message.
   void stop(const char* msg);
+
+  // Linux/IA-64 (arch/ia64/kernel/traps.c, ia64_bad_break) delivers break
+  // immediates in [0x40000, 0x80000) as SIGILL with si_code __ILL_BREAK,
+  // distinct from break 0 (GCC's __builtin_trap) and break 1 (integer divide
+  // by zero, SIGFPE). [UNVERIFIED on rx2800 -- from the Linux source.]
+  static const uint32_t stop_break_imm = 0x40000 | 0x5709;
+  // pc may carry a slot number in its low bits, as the kernel reports it.
+  static bool is_stop(address pc);
+  static const char* stop_message(address pc);
 
   void verify_oop(Register reg, const char* s = "broken oop") {}
   void verify_oop_msg(Register reg, const char* msg) {}

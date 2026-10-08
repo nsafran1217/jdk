@@ -47,13 +47,6 @@ static address libjvm_gp() {
   return gp_value;
 }
 
-// The break.b immediate stop() uses. Linux/IA-64 (arch/ia64/kernel/traps.c,
-// ia64_bad_break) delivers break immediates in [0x40000, 0x80000) as SIGILL
-// with si_code __ILL_BREAK, distinct from break 0 (GCC's __builtin_trap) and
-// break 1 (integer divide by zero, SIGFPE). [UNVERIFIED on rx2800 -- the
-// kernel mapping is from the Linux source, not yet observed.]
-static const uint32_t stop_break_imm = 0x40000 | 0x5709;
-
 void MacroAssembler::add_imm(Register dst, Register src, int64_t imm, Register tmp) {
   if (ia64::is_simm14(imm)) {
     if (imm != 0 || dst != src) adds(dst, imm, src);
@@ -487,6 +480,17 @@ void MacroAssembler::stop(const char* msg) {
   brk(stop_break_imm);
   emit_int64((int64_t)(uintptr_t)msg);
   emit_int64(0);
+}
+
+bool MacroAssembler::is_stop(address pc) {
+  const ia64::Bundle* b = (const ia64::Bundle*)align_down(pc, BytesPerBundle);
+  ia64::Bundle expected = ia64::BundleB(ia64::BreakB(stop_break_imm));
+  return b->lo == expected.lo && b->hi == expected.hi;
+}
+
+const char* MacroAssembler::stop_message(address pc) {
+  assert(is_stop(pc), "not a stop()");
+  return *(const char**)(align_down(pc, BytesPerBundle) + BytesPerBundle);
 }
 
 void MacroAssembler::debug64(char* msg, int64_t pc, int64_t regs[]) {

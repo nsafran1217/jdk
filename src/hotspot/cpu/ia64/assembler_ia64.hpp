@@ -91,6 +91,13 @@ constexpr Register Rsender_sp   = r18;
 constexpr Register      Rtos  = r8;
 constexpr FloatRegister Ftos  = f8;
 
+// Exception dispatch (forward_exception, catch_exception, the interpreter's
+// throw entries, the exception blob): the exception oop in r8, the throwing
+// pc in r28. riscv uses x10/x13 the same way; r28 is chosen because it is
+// neither an argument register nor MacroAssembler scratch.
+constexpr Register Rexception    = r8;
+constexpr Register Rexception_pc = r28;
+
 // Return values. r8 also carries the buffer address for a large aggregate
 // return, which does not consume out0.
 constexpr Register Rret         = r8;
@@ -248,6 +255,13 @@ class Assembler : public AbstractAssembler {
   // Every instruction is a whole bundle, so instruction length is constant.
   static unsigned int instr_len(unsigned char* instr) { return BytesPerBundle; }
   static unsigned int instr_maxlen()                  { return BytesPerBundle; }
+
+  // The instruction after the one at |inst|. A pc from a signal context may
+  // carry a slot number in its low bits; one instruction per bundle makes the
+  // next instruction simply the next bundle.
+  static address locate_next_instruction(address inst) {
+    return align_down(inst, BytesPerBundle) + BytesPerBundle;
+  }
 
   // Resolve a label reference recorded at |branch| now that the label is
   // bound to |target|. Two kinds of site are ever registered:
