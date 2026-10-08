@@ -603,7 +603,9 @@ BasicType frame::interpreter_frame_result(oop* oop_result, jvalue* value_result)
     case T_INT     : value_result->i = *(jint*)tos_addr; break;
     case T_LONG    : value_result->j = *(jlong*)tos_addr; break;
     case T_FLOAT   : {
-        value_result->f = *(jfloat*)tos_addr;
+        // generate_native_entry saves a float result in double format (stfd),
+        // not as a float in the low word as on x86/riscv.
+        value_result->f = (jfloat)*(jdouble*)tos_addr;
       break;
     }
     case T_DOUBLE  : value_result->d = *(jdouble*)tos_addr; break;

@@ -354,7 +354,13 @@ address TemplateInterpreterGenerator::generate_result_handler_for(BasicType type
     case T_INT    : __ sxt4(Rret, Rret); break;
     case T_LONG   : /* nothing to do */ break;
     case T_VOID   : /* nothing to do */ break;
-    case T_FLOAT  : /* nothing to do: in f8 */ break;
+    case T_FLOAT:
+      // The native entry saved f8 as a double (see generate_native_entry);
+      // make it single-typed again so stfs and float arithmetic see the right
+      // value. Exact, since the value came from a float. NaNs untouched.
+      __ fcmp_unord(ptmp0, ptmp1, Ftos, Ftos);
+      __ fnorm_s(Ftos, Ftos, ptmp1);
+      break;
     case T_DOUBLE : /* nothing to do: in f8 */ break;
     default       : ShouldNotReachHere();
   }
@@ -872,6 +878,17 @@ address TemplateInterpreterGenerator::generate_native_entry(bool synchronized) {
   // in order to extract the result of a method call. If the order of these
   // pushes change or anything else is added to the stack then the code in
   // interpreter_frame_result must also change.
+  //
+  // f8 is saved as a double (stfd), whatever the result type -- and stfd needs
+  // a double-*typed* register value (SDM vol. 1 5.3.1). A float result is
+  // single-typed: a float denormal is held unnormalised with exponent 0x0FF81
+  // (vol. 1 Table 5-2), which stfd turns into an unrelated double. So convert
+  // to double format first: exact for every float and a no-op for a double.
+  // NaNs are skipped, because fnorm would quieten a signalling NaN and change
+  // its bits; stfd/ldfd/stfs carry a NaN's payload through unchanged. The
+  // T_FLOAT result handler converts back.
+  __ fcmp_unord(ptmp0, ptmp1, Ftos, Ftos);
+  __ fnorm_d(Ftos, Ftos, ptmp1);
   __ push(dtos);
   __ push(ltos);
 
