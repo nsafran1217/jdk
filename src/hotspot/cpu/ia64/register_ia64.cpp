@@ -35,10 +35,10 @@ FloatRegister::FloatRegisterImpl all_FloatRegisterImpls[FloatRegister::number_of
 const char* Register::RegisterImpl::name() const {
   static const char *const names[number_of_registers] = {
     "zr",       "gp",       "t0",        "t1",
-    "Rthread",  "Rbcp",     "Rlocals",   "Resp",
+    "fp",       "Rthread",  "Rbcp",      "Resp",
     "r8",       "t2",       "t3",        "t4",
     "sp",       "tp",       "Rmethod",   "Rcpool",
-    "Rmonitors", "Rdispatch", "Rsender_sp", "r19",
+    "Rmonitors", "Rdispatch", "Rsender_sp", "Rlocals",
     "r20",      "r21",      "r22",       "r23",
     "r24",      "r25",      "r26",       "r27",
     "r28",      "r29",      "r30",       "r31",

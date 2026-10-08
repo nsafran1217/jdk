@@ -59,12 +59,23 @@ constexpr Register t3           = r10;
 constexpr Register t4           = r11;
 
 // Preserved across a C call -- the only four the architecture gives us.
-constexpr Register Rthread      = r4;    // current JavaThread
-constexpr Register Rbcp         = r5;    // bytecode pointer
-constexpr Register Rlocals      = r6;    // locals base
+//
+// fp is HotSpot's frame linkage (frame::fp(), the link slot, last_Java_fp),
+// not an ABI frame pointer: IA-64 unwinding is table-driven and C code keeps
+// no fp chain. It must be preserved because generated code reaches every
+// other piece of interpreter state through it once a C call has clobbered
+// the scratch registers. SpiderMonkey's IA-64 backend makes the same choice
+// (FramePointer = r4). See FRAME-DESIGN.md section 2.2.
+constexpr Register fp           = r4;    // frame pointer (HotSpot linkage)
+constexpr Register Rthread      = r5;    // current JavaThread
+constexpr Register Rbcp         = r6;    // bytecode pointer
 constexpr Register Resp         = r7;    // Java expression stack pointer
 
-// Caller-saved: reloaded from the frame after every VM call.
+// Caller-saved: reloaded from the frame after every VM call. Rlocals is
+// constant for the life of a frame and lives in the locals slot, so it costs
+// one fp-relative load to get back; the interpreter's call_VM_base and
+// call_VM_leaf_base do that unconditionally.
+constexpr Register Rlocals      = r19;   // locals base
 constexpr Register Rmethod      = r14;
 constexpr Register Rcpool       = r15;
 constexpr Register Rmonitors    = r16;

@@ -37,10 +37,11 @@
 // port's remaining volume lives (157 bytecode templates on top of this).
 //
 // One IA-64 consequence to keep in mind while filling these in: only r4-r7 are
-// preserved across a C call, so Rmethod, Rcpool, Rmonitors, Rdispatch and
-// Rsender_sp do NOT survive call_VM and must be reloaded from the frame
-// afterwards. Rthread, Rbcp, Rlocals and Resp do survive, which is why they
-// were given the four preserved registers. See FRAME-DESIGN.md section 2.3.
+// preserved across a C call, so Rlocals, Rmethod, Rcpool, Rmonitors, Rdispatch
+// and Rsender_sp do NOT survive call_VM -- nor call_VM_leaf -- and must be
+// reloaded from the frame afterwards. fp, Rthread, Rbcp and Resp do survive,
+// which is why they were given the four preserved registers. See
+// FRAME-DESIGN.md section 2.3.
 
 typedef ByteSize (*OffsetFunction)(uint);
 

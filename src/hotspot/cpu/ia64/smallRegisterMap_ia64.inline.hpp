@@ -27,11 +27,13 @@
 
 // Ported from cpu/riscv unchanged apart from renaming.
 //
-// That is safe here, and checked rather than assumed: these files contain no
-// register references at all (verified by grep before porting) -- they are
-// pure frame-layout arithmetic, and frame_ia64.hpp deliberately uses the same
-// slot numbering as frame_riscv.hpp so that exactly this kind of shared
-// reasoning transfers. If the frame layout is ever changed away from riscv's,
+// That is safe here because the file is frame-layout arithmetic over the
+// slot numbering frame_ia64.hpp deliberately shares with frame_riscv.hpp. Its
+// one register reference is fp, the frame-linkage register, which on IA-64 is
+// r4 (assembler_ia64.hpp) -- preserved across C calls exactly as riscv's fp
+// is, and saved at sp - 2 by every prologue, which is all this file assumes.
+// (An earlier version of this note claimed the file named no registers at
+// all; it did, and fp did not yet exist, so the claim hid a design gap.) If the frame layout is ever changed away from riscv's,
 // every file carrying this notice must be re-derived, not re-renamed.
 //
 // Continuations are disabled for now (VMContinuations is false in
