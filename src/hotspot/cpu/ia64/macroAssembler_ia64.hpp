@@ -98,6 +98,21 @@ class MacroAssembler : public Assembler {
   void add_imm(Register dst, Register src, int64_t imm, Register tmp = t0);
   void sub_imm(Register dst, Register src, int64_t imm, Register tmp = t0) { add_imm(dst, src, -imm, tmp); }
 
+  // dst = src * imm. Powers of two shift; anything else goes through the FP
+  // unit's xma.l (IA-64 integer units have no multiplier), using ftmp0/ftmp1
+  // and tmp. Not for hot paths.
+  void mul_imm(Register dst, Register src, int64_t imm, Register tmp = t0);
+  // dst = a * b (low 64 bits), through xma.l. Clobbers ftmp0/ftmp1.
+  void mul(Register dst, Register a, Register b);
+
+  // Load an unaligned little-endian (native order) value of 2 or 4 bytes
+  // from base + offset, zero-extended, one byte at a time: IA-64 faults on a
+  // misaligned access and the kernel's fixup is slow and logs. Clobbers tmp.
+  void load_unaligned_le(Register dst, Register base, int offset, int size, Register tmp);
+  // The same for a big-endian value (bytecode operands in the classfile's
+  // own order, before the rewriter replaces them).
+  void load_unaligned_be(Register dst, Register base, int offset, int size, Register tmp);
+
   // Materialise the effective address of |adr| into |dst|. IA-64 has no
   // displacement addressing, so this is a real computation at every access
   // site rather than something folded into the load or store. Uses t0 only
@@ -359,11 +374,69 @@ class MacroAssembler : public Assembler {
   // one-directional orderings come from ld.acq / st.rel at the access itself.
   // So every membar kind other than "none" is an mf here, deliberately
   // conservative (CPU_MULTI_COPY_ATOMIC is undefined for the same reason).
+  enum Membar_mask_bits {
+    LoadLoad   = 1 << 0,
+    LoadStore  = 1 << 1,
+    StoreLoad  = 1 << 2,
+    StoreStore = 1 << 3,
+    AnyAny     = LoadLoad | LoadStore | StoreLoad | StoreStore
+  };
   void membar(int order_constraint) { if (order_constraint != 0) mf(); }
+
+  // ---- heap and metadata access ---------------------------------------------
+  //
+  // Oop accesses go through the GC's BarrierSetAssembler, as on every port.
+  // Compressed oops are off in milestone 1 (FRAME-DESIGN.md 2.4); compressed
+  // class pointers are supported, since decoding one is a shift and a movl'd
+  // base -- IA-64's high mmap addresses do not matter to an arbitrary base.
+
+  void access_load_at(BasicType type, DecoratorSet decorators, Register dst, Address src,
+                      Register tmp1 = noreg, Register tmp2 = noreg);
+  void access_store_at(BasicType type, DecoratorSet decorators, Address dst, Register val,
+                       Register tmp1 = noreg, Register tmp2 = noreg, Register tmp3 = noreg);
+
+  void load_heap_oop(Register dst, Address src, Register tmp1 = noreg,
+                     Register tmp2 = noreg, DecoratorSet decorators = 0);
+  void load_heap_oop_not_null(Register dst, Address src, Register tmp1 = noreg,
+                              Register tmp2 = noreg, DecoratorSet decorators = 0);
+  void store_heap_oop(Address dst, Register val, Register tmp1 = noreg,
+                      Register tmp2 = noreg, Register tmp3 = noreg, DecoratorSet decorators = 0);
+  // Store a null; no barrier needed for the card table.
+  void store_heap_oop_null(Address dst) { access_store_at(T_OBJECT, IN_HEAP, dst, noreg); }
+
+  // result = *result, for an OopHandle.
+  void resolve_oop_handle(Register result, Register tmp1 = noreg, Register tmp2 = noreg);
+
+  void load_method_holder(Register holder, Register method);
+  void load_mirror(Register dst, Register method, Register tmp1 = noreg, Register tmp2 = noreg);
+
+  // dst = src->klass(). Clobbers t0 when class pointers are compressed with a
+  // non-zero base.
+  void load_klass(Register dst, Register src);
+  void decode_klass_not_null(Register r);
+
+  // Branch to L_success if sub_klass is a subtype of super_klass, else fall
+  // through. The fast path checks the primary-supers display and the
+  // secondary-super cache; the slow path scans the secondary supers linearly
+  // and updates the cache on a hit. Clobbers tmp1, tmp2, t0, t1, ptmp0/1.
+  void check_klass_subtype(Register sub_klass, Register super_klass,
+                           Register tmp1, Register tmp2, Label& L_success);
+  void check_klass_subtype_fast_path(Register sub_klass, Register super_klass, Register tmp,
+                                     Label* L_success, Label* L_failure, Label* L_slow_path);
+  void check_klass_subtype_slow_path(Register sub_klass, Register super_klass,
+                                     Register tmp1, Register tmp2,
+                                     Label* L_success, Label* L_failure);
+
+  // Thread-local safepoint poll. at_return compares against the stack
+  // watermark (fp, or sp in an nmethod) instead of testing the poll bit.
+  void safepoint_poll(Label& slow_path, bool at_return, bool acquire, bool in_nmethod,
+                      Register tmp = t1);
 
   // ---- debugging -----------------------------------------------------------
 
   void should_not_reach_here() { stop("should not reach here"); }
+  // Used by the shared TemplateTable for bytecodes a port has not provided.
+  void unimplemented(const char* what = "");
   // Trap with a message. The message address is materialised into a
   // register the signal handler knows (see os_linux_ia64.cpp), then break.b.
   void stop(const char* msg);

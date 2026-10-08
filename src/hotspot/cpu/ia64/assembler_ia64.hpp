@@ -78,9 +78,18 @@ constexpr Register Resp         = r7;    // Java expression stack pointer
 constexpr Register Rlocals      = r19;   // locals base
 constexpr Register Rmethod      = r14;
 constexpr Register Rcpool       = r15;
-constexpr Register Rmonitors    = r16;
-constexpr Register Rdispatch    = r17;
 constexpr Register Rsender_sp   = r18;
+// r16 and r17 were Rmonitors and Rdispatch in the first design; neither earns
+// a register. The monitor block top lives in the frame (as on riscv), and a
+// dispatch table's address is a constant -- safepoints copy table *contents*
+// into the active table -- so one movl rematerialises it with no load.
+// FRAME-DESIGN.md 9.3, now closed.
+
+// The interpreter's cached top-of-stack: r8 / f8, the psABI integer and FP
+// return registers, so a C or Java call's result lands where the template
+// expects it.
+constexpr Register      Rtos  = r8;
+constexpr FloatRegister Ftos  = f8;
 
 // Return values. r8 also carries the buffer address for a large aggregate
 // return, which does not consume out0.
@@ -127,6 +136,25 @@ constexpr FloatRegister j_farg4 = f12;
 constexpr FloatRegister j_farg5 = f13;
 constexpr FloatRegister j_farg6 = f14;
 constexpr FloatRegister j_farg7 = f15;
+
+class Argument {
+ public:
+  enum {
+    // The psABI numbers C arguments positionally, 1-8: each position has both
+    // a GR slot (out0-out7) and an FR slot (f8-f15), and an argument consumes
+    // the position whichever kind it uses. So there are 8 register positions
+    // in total, not 8 + 8 -- c_calling_convention must count them jointly.
+    n_int_register_parameters_c   = 8,  // out0 ... out7 (c_rarg0, c_rarg1, ...)
+    n_float_register_parameters_c = 8,  // f8 ... f15    (c_farg0, c_farg1, ...)
+
+    // The Java convention is this port's own choice (FRAME-DESIGN.md 6.2) and
+    // is NOT positional: integer and FP arguments are counted independently.
+    // SharedRuntime::java_calling_convention must agree with these counts;
+    // shared code (signature.cpp) uses them to size the stack arguments.
+    n_int_register_parameters_j   = 8,  // r20 ... r27   (j_rarg0, j_rarg1, ...)
+    n_float_register_parameters_j = 8   // f8 ... f15    (j_farg0, j_farg1, ...)
+  };
+};
 
 // FP scratch. f2-f5 are reserved separately as internal temporaries for the
 // multi-step divide, sqrt and 64x64 multiply sequences and are never handed
