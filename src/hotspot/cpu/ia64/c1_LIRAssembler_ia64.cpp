@@ -461,7 +461,18 @@ class IA64LoopSafepointPollStub : public CodeStub {
 
 int LIR_Assembler::safepoint_poll(LIR_Opr tmp, CodeEmitInfo* info) {
   guarantee(info != nullptr, "Shouldn't be null");
-  __ ld8(t1, Address(Rthread, JavaThread::polling_word_offset()));
+  if (UsePollWordRegister) {
+#ifdef ASSERT
+    Label ok;
+    __ adds(t2, in_bytes(JavaThread::polling_word_offset()), Rthread);
+    __ beq(t2, C1_MacroAssembler::Rpoll_word, ok);
+    __ stop("IA-64: r7 does not hold &JavaThread::_poll_word at a C1 loop poll");
+    __ bind(ok);
+#endif
+    __ Assembler::ld8(t1, C1_MacroAssembler::Rpoll_word);
+  } else {
+    __ ld8(t1, Address(Rthread, JavaThread::polling_word_offset()));
+  }
   __ tbit_nz(ptmp0, ptmp1, t1, exact_log2(SafepointMechanism::poll_bit()));
   int poll_offset = __ offset();
   IA64LoopSafepointPollStub* stub = new IA64LoopSafepointPollStub(poll_offset);
@@ -1602,6 +1613,7 @@ void LIR_Assembler::call(LIR_OpJavaCall* op, relocInfo::relocType rtype) {
   }
   __ far_call(op->addr(), rspec);
   add_call_info(code_offset(), op->info());
+  __ set_poll_word_register();
 }
 
 // The inline cache: the CompiledICData* in a movl to t1 (nmethod::
@@ -1613,6 +1625,7 @@ void LIR_Assembler::ic_call(LIR_OpJavaCall* op) {
   __ movl(t1, (uint64_t)(uintptr_t)Universe::non_oop_word());
   __ far_call(op->addr(), virtual_call_Relocation::spec(movl_pc));
   add_call_info(code_offset(), op->info());
+  __ set_poll_word_register();
 }
 
 void LIR_Assembler::emit_static_call_stub() {

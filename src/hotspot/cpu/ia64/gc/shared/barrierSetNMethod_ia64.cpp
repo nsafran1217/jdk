@@ -43,7 +43,11 @@
 static int* guard_addr(nmethod* nm) {
   address barrier = nm->code_begin() + nm->frame_complete_offset()
                     - BarrierSetAssembler::entry_barrier_size;
-  // The barrier is "br over", then the guard bundle.
+  // The barrier is "br over" (a lone MIB bundle with its stop), then the
+  // guard bundle. Anything emitted between the barrier and frame-complete
+  // would move this window onto code -- and the guard store would corrupt it.
+  assert((barrier[0] & 0x1f) == 0x11,
+         "nmethod entry barrier not where frame-complete says: " PTR_FORMAT, p2i(barrier));
   return (int*)(barrier + BarrierSetAssembler::entry_barrier_guard_offset);
 }
 

@@ -126,4 +126,13 @@ using MacroAssembler::null_check;
 
   void inline_cache_check(Register receiver, Register iCache, Label &L);
 
+  // UsePollWordRegister: compiled C1 code keeps &JavaThread::_poll_word in
+  // r7 (Resp, which compiled code otherwise leaves alone and C callees
+  // preserve), so a loop poll is ld8 + tbit with no address computation.
+  // Set at method and OSR entry (build_frame), after every Java call (an
+  // interpreted callee uses r7 as Resp) and at exception-handler entry
+  // (Runtime1 handle_exception). Debug builds check it at every loop poll.
+  static constexpr Register Rpoll_word = r7;
+  void set_poll_word_register();
+
 #endif // CPU_IA64_C1_MACROASSEMBLER_IA64_HPP

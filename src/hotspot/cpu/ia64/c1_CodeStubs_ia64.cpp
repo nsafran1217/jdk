@@ -313,6 +313,7 @@ void ArrayCopyStub::emit_code(LIR_Assembler* ce) {
   }
   __ far_call(SharedRuntime::get_resolve_static_call_stub(), static_call_Relocation::spec());
   ce->add_call_info_here(info());
+  __ set_poll_word_register();       // a Java call: the callee may be interpreted
 
   __ j(_continuation);
 }

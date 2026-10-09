@@ -364,6 +364,9 @@ OopMapSet* Runtime1::generate_handle_exception(C1StubId id, StubAssembler *sasm)
       break;
     default: ShouldNotReachHere();
   }
+  // The handler is compiled code, entered not by a call but by this stub's
+  // return: it needs r7 like any entry (UsePollWordRegister).
+  __ set_poll_word_register();
 
   return oop_maps;
 }

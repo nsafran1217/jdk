@@ -230,6 +230,12 @@ void C1_MacroAssembler::allocate_array(Register obj, Register len, Register tmp1
 // bottom 16 bytes are the psABI scratch area (FrameMap::
 // first_available_sp_in_frame). sp moves before anything is stored below
 // it: there is no red zone. t2/t3 are free at a method entry.
+void C1_MacroAssembler::set_poll_word_register() {
+  if (UsePollWordRegister) {
+    adds(Rpoll_word, in_bytes(JavaThread::polling_word_offset()), Rthread);
+  }
+}
+
 void C1_MacroAssembler::build_frame(int framesize, int bang_size_in_bytes) {
   assert(bang_size_in_bytes >= framesize, "stack bang size incorrect");
   assert(is_aligned(framesize, StackAlignmentInBytes), "frame size must keep sp aligned");
@@ -245,6 +251,11 @@ void C1_MacroAssembler::build_frame(int framesize, int bang_size_in_bytes) {
   adds(t1, frame::link_offset * wordSize, t3);
   Assembler::st8(t1, fp);
   mov(fp, t3);
+
+  // Before the entry barrier, which must end the prologue: BarrierSetNMethod
+  // finds its guard at a fixed distance before the frame-complete offset.
+  // (After it, disarming wrote the guard over the barrier's own code.)
+  set_poll_word_register();
 
   // Insert nmethod entry barrier into frame.
   BarrierSetAssembler* bs = BarrierSet::barrier_set()->barrier_set_assembler();
