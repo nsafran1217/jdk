@@ -2515,7 +2515,14 @@ AdapterHandlerEntry* AdapterHandlerLibrary::_obj_obj_arg_handler = nullptr;
 #if INCLUDE_CDS
 ArchivedAdapterTable AdapterHandlerLibrary::_aot_adapter_handler_table;
 #endif // INCLUDE_CDS
+// IA-64 code is one instruction per 16-byte bundle with no displacement
+// addressing: an adapter or native wrapper for a 255-slot signature needs
+// several times the space.
+#if defined(IA64)
+static const int AdapterHandlerLibrary_size = 64*K;
+#else
 static const int AdapterHandlerLibrary_size = 16*K;
+#endif
 BufferBlob* AdapterHandlerLibrary::_buffer = nullptr;
 
 BufferBlob* AdapterHandlerLibrary::buffer_blob() {
