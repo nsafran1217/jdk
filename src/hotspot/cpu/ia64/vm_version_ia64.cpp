@@ -47,6 +47,12 @@ void VM_Version::initialize() {
     vm_exit_during_initialization("Compressed oops are not yet supported on IA-64",
                                   "run with -XX:-UseCompressedOops");
   }
+  // Refused rather than switched off: by now argument processing has laid
+  // out narrow klass pointers for compact headers.
+  if (UseCompactObjectHeaders) {
+    vm_exit_during_initialization("Compact object headers are not yet supported on IA-64",
+                                  "run with -XX:-UseCompactObjectHeaders");
+  }
 
   // IA-64 traps on unaligned access rather than fixing it up in hardware. The
   // kernel can emulate the trap, but at a cost that makes it worse than the
