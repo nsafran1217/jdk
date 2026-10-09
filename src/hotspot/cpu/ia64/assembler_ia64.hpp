@@ -651,7 +651,23 @@ class Assembler : public AbstractAssembler {
     }
   }
 
-  void emit_unit(Unit u, ia64::Insn insn, const Deps& d) {
+  // A store (M opcode 4-7, x clear, x6 0x30-0x3b: st1-8[.rel], st8.spill,
+  // stf*). With UseBundleScheduling each also writes a pseudo-resource (BR
+  // class, number 64; there are only 8 branch registers) so no two stores
+  // share an instruction group: the scheduler would otherwise pair them,
+  // which made allocation-heavy code ~15% slower on rx2800.
+  static bool is_store(Unit u, ia64::Insn insn) {
+    if (u != U_M) return false;
+    int op = (int)((insn >> 37) & 0xf), x = (int)((insn >> 27) & 1), x6 = (int)((insn >> 30) & 0x3f);
+    return op >= 4 && op <= 7 && x == 0 && x6 >= 0x30 && x6 <= 0x3b;
+  }
+  static const int kStoreSlot = 64;
+
+  void emit_unit(Unit u, ia64::Insn insn, const Deps& d0) {
+    Deps d = d0;
+    if (_pack_depth > 0 && UseBundleScheduling && is_store(u, insn) && d.nwr < 3) {
+      d.wr(Deps::BR, kStoreSlot);
+    }
     if (_pack_depth > 0 && UseBundleScheduling) {
       if (d.is_branch || d.keep_stop) {
         flush_window();
