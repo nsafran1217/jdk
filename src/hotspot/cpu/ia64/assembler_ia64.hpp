@@ -454,7 +454,13 @@ class Assembler : public AbstractAssembler {
   // Position observers: close the open bundle first (see above).
   address pc()  { close_bundle(); return AbstractAssembler::pc(); }
   int offset()  { close_bundle(); return AbstractAssembler::offset(); }
-  void bind(Label& L) { close_bundle(); AbstractAssembler::bind(L); }
+  // A label also ends the instruction group, keeping the stop before it.
+  // Continuing the group across it would be legal (a taken branch to it
+  // starts a new group anyway), but then the label's first instructions
+  // carry the fall-through path's dependencies, and at a loop head that
+  // puts a stop inside every iteration instead of one before the loop.
+  void bind(Label& L) { close_bundle(); end_group(); AbstractAssembler::bind(L); }
+  void end_group() { _last_sect = nullptr; _last_off = -1; clear_pending(); }
   void relocate(RelocationHolder const& rspec, int format = 0) {
     close_bundle(); AbstractAssembler::relocate(rspec, format);
   }
