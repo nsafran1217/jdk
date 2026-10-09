@@ -130,11 +130,11 @@ define_pd_global(intx, InlineSmallCode, 1000);
           "Pack up to three instructions per bundle in compiled code "          \
           "(BUNDLING.md, Stage 2)")                                            \
                                                                                  \
-  product(bool, UseBundleScheduling, false, DIAGNOSTIC,                          \
+  product(bool, UseBundleScheduling, true, DIAGNOSTIC,                           \
           "Reorder packable instructions within a basic block before packing " \
           "(BUNDLING.md, Stage 3)")                                            \
                                                                                  \
-  product(bool, C1LazyIntExtension, false, DIAGNOSTIC,                           \
+  product(bool, C1LazyIntExtension, true, DIAGNOSTIC,                            \
           "C1 leaves the upper 32 bits of an int register undefined and "      \
           "sign-extends only where a 64-bit value is consumed")              \
                                                                                  \
