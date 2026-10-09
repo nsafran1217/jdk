@@ -180,8 +180,12 @@ void C1_MacroAssembler::initialize_object(Register obj, Register klass, Register
 void C1_MacroAssembler::allocate_array(Register obj, Register len, Register tmp1, Register tmp2, int base_offset_in_bytes, int f, Register klass, Label& slow_case, bool zero_array) {
   assert_different_registers(obj, len, tmp1, tmp2, klass);
 
-  // check for negative or excessive length (len is sign-extended: a negative
-  // length is a huge unsigned value)
+  // check for negative or excessive length: sign-extended, a negative length
+  // is a huge unsigned value (extended in place under C1LazyIntExtension; the
+  // int value is unchanged)
+  if (C1LazyIntExtension) {
+    sxt4(len, len);
+  }
   mov_immediate(t2, (int32_t)max_array_allocation_length);
   bgeu(len, t2, slow_case);
 

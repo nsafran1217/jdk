@@ -51,9 +51,18 @@
 // * Flags-style LIR, as x86/aarch64: lir_cmp sets the predicate pair p10/p11
 //   (pcond/pncond, plus punord for floats) and the following branch or cmove
 //   tests it (c1_LIRAssembler_ia64.hpp).
-// * Ints are kept sign-extended in registers, as the interpreter keeps them:
-//   an operation that can carry out of the low 32 bits is followed by sxt4,
-//   and int loads sign-extend.
+// * Ints: only the low 32 bits of an int register are defined when
+//   C1LazyIntExtension is on; otherwise ints are kept sign-extended, as the
+//   interpreter keeps them (an operation that can carry out of the low 32
+//   bits is followed by sxt4 -- int_result -- and int loads sign-extend).
+//   Either way every consumer that reads all 64 bits extends first: int
+//   compares use cmp4; an int array index, i2l, i2f/i2d, int division,
+//   arithmetic right shift, arraycopy and array-allocation lengths sign-
+//   extend explicitly; an int result returned to a caller is sign-extended,
+//   since the interpreter takes r8 as its sign-extended top of stack. Values
+//   reaching the interpreter through memory are re-read with ld4s, and C
+//   callees extend their own narrow arguments (GCC's IA-64 PROMOTE_MODE stops
+//   at SImode).
 // * No displacement addressing: an access computes its address first
 //   (addr_reg), so an implicit null check records the pc of the load or store
 //   itself, not of the adds before it.
@@ -73,6 +82,19 @@ const Register SYNC_header = r8;    // synchronization header
 const Register SHIFT_count = r8;    // where count for shift operations must be
 
 #define __ _masm->
+
+void LIR_Assembler::int_result(Register r) {
+  if (!C1LazyIntExtension) {
+    __ sxt4(r, r);
+  }
+}
+
+Register LIR_Assembler::int_operand(Register r) {
+  if (C1LazyIntExtension) {
+    __ sxt4(r, r);
+  }
+  return r;
+}
 
 bool LIR_Assembler::is_small_constant(LIR_Opr opr) { Unimplemented(); return false; }
 
@@ -126,8 +148,10 @@ Register LIR_Assembler::addr_reg(LIR_Address* addr, Register tmp) {
   if (index_opr->is_constant()) {
     disp += ((intptr_t)index_opr->as_constant_ptr()->as_jint()) << scale;
   } else if (index_opr->is_cpu_register()) {
-    // An int index is sign-extended in its register, so it can be used whole.
     Register index = as_reg(index_opr);
+    if (index_opr->type() == T_INT) {
+      int_operand(index);
+    }
     if (!ia64::is_simm14(disp)) {
       __ movl(tmp, (uint64_t)disp);
       __ add(tmp, tmp, base);
@@ -380,6 +404,10 @@ int LIR_Assembler::emit_deopt_handler() {
 
 void LIR_Assembler::return_op(LIR_Opr result, C1SafepointPollStub* code_stub) {
   assert(result->is_illegal() || !result->is_single_cpu() || result->as_register() == r8, "word returns are in r8");
+  if (result->is_single_cpu() && result->type() == T_INT && C1LazyIntExtension) {
+    // An interpreted caller takes r8 as its sign-extended int top of stack.
+    __ sxt4(r8, r8);
+  }
 
   // Pop the stack before the safepoint code
   __ remove_frame(initial_frame_size_in_bytes());
@@ -727,7 +755,7 @@ void LIR_Assembler::stack2reg(LIR_Opr src, LIR_Opr dest, BasicType type) {
     Register d = dest->as_register();
     if (type == T_INT) {
       __ Assembler::ld4(d, a);
-      __ sxt4(d, d);
+      int_result(d);
     } else if (is_reference_type(type) || type == T_METADATA || type == T_ADDRESS) {
       __ Assembler::ld8(d, a);
       __ verify_oop(d);
@@ -812,7 +840,7 @@ void LIR_Assembler::mem2reg(LIR_Opr src, LIR_Opr dest, BasicType type, LIR_Patch
       break;
     case T_INT:
       __ Assembler::ld4(dest->as_register(), a);
-      __ sxt4(dest->as_register(), dest->as_register());
+      int_result(dest->as_register());
       break;
     case T_LONG:
       __ Assembler::ld8(dest->as_register_lo(), a);
@@ -911,7 +939,21 @@ void LIR_Assembler::comp_op(LIR_Condition condition, LIR_Opr opr1, LIR_Opr opr2,
     ShouldNotReachHere();
     b = noreg;
   }
-  // Ints are sign-extended, so the full 64-bit compare is the int compare too.
+  if (opr1->type() == T_INT) {
+    // cmp4 reads only the low 32 bits: the int compare under either model.
+    switch (condition) {
+      case lir_cond_equal:        __ cmp4_eq (pcond,  pncond, a, b); break;
+      case lir_cond_notEqual:     __ cmp4_eq (pncond, pcond,  a, b); break;
+      case lir_cond_less:         __ cmp4_lt (pcond,  pncond, a, b); break;
+      case lir_cond_greaterEqual: __ cmp4_lt (pncond, pcond,  a, b); break;
+      case lir_cond_greater:      __ cmp4_lt (pcond,  pncond, b, a); break;
+      case lir_cond_lessEqual:    __ cmp4_lt (pncond, pcond,  b, a); break;
+      case lir_cond_belowEqual:   __ cmp4_ltu(pncond, pcond,  b, a); break;
+      case lir_cond_aboveEqual:   __ cmp4_ltu(pncond, pcond,  a, b); break;
+      default:                    ShouldNotReachHere();
+    }
+    return;
+  }
   switch (condition) {
     case lir_cond_equal:        __ cmp_eq (pcond,  pncond, a, b); break;
     case lir_cond_notEqual:     __ cmp_eq (pncond, pcond,  a, b); break;
@@ -1037,12 +1079,12 @@ void LIR_Assembler::emit_opConvert(LIR_OpConvert* op) {
     // integer -> FP: the significand path, exact in register format, then
     // one rounding to the result type.
     case Bytecodes::_i2f:
-      __ setf_sig(dest->as_float_reg(), src->as_register());
+      __ setf_sig(dest->as_float_reg(), int_operand(src->as_register()));
       __ fcvt_xf(dest->as_float_reg(), dest->as_float_reg());
       __ fnorm_s(dest->as_float_reg(), dest->as_float_reg());
       break;
     case Bytecodes::_i2d:
-      __ setf_sig(dest->as_double_reg(), src->as_register());
+      __ setf_sig(dest->as_double_reg(), int_operand(src->as_register()));
       __ fcvt_xf(dest->as_double_reg(), dest->as_double_reg());
       __ fnorm_d(dest->as_double_reg(), dest->as_double_reg());
       break;
@@ -1065,13 +1107,23 @@ void LIR_Assembler::emit_opConvert(LIR_OpConvert* op) {
     case Bytecodes::_i2c:
       __ zxt2(dest->as_register(), src->as_register()); break;
     case Bytecodes::_i2l:
-      __ mov(dest->as_register_lo(), src->as_register()); break;   // already sign-extended
+      if (C1LazyIntExtension) {
+        __ sxt4(dest->as_register_lo(), src->as_register());
+      } else {
+        __ mov(dest->as_register_lo(), src->as_register());   // already sign-extended
+      }
+      break;
     case Bytecodes::_i2s:
       __ sxt2(dest->as_register(), src->as_register()); break;
     case Bytecodes::_i2b:
       __ sxt1(dest->as_register(), src->as_register()); break;
     case Bytecodes::_l2i:
-      __ sxt4(dest->as_register(), src->as_register_lo()); break;
+      if (C1LazyIntExtension) {
+        __ mov(dest->as_register(), src->as_register_lo());
+      } else {
+        __ sxt4(dest->as_register(), src->as_register_lo());
+      }
+      break;
     case Bytecodes::_d2l:
       __ java_fp_to_long(dest->as_register_lo(), src->as_double_reg()); break;
     case Bytecodes::_f2i:
@@ -1386,10 +1438,9 @@ void LIR_Assembler::atomic_op(LIR_Code code, LIR_Opr src, LIR_Opr data, LIR_Opr 
         __ cmpxchg8_acq(t4, addr, t3);
       }
       __ bne(t4, t2, retry);
+      __ mov(dst, t2);
       if (is_int) {
-        __ sxt4(dst, t2);
-      } else {
-        __ mov(dst, t2);
+        int_result(dst);
       }
       break;
     }
@@ -1398,7 +1449,7 @@ void LIR_Assembler::atomic_op(LIR_Code code, LIR_Opr src, LIR_Opr data, LIR_Opr 
       assert_different_registers(obj, addr);
       if (is_int) {
         __ xchg4(dst, addr, obj);
-        __ sxt4(dst, dst);
+        int_result(dst);
       } else {
         __ xchg8(dst, addr, obj);
       }
@@ -1483,9 +1534,9 @@ void LIR_Assembler::shift_op(LIR_Code code, LIR_Opr left, LIR_Opr count, LIR_Opr
     assert (left->type() == T_INT, "unexpected left type");
     __ and_imm(t1, 31, count_reg);
     switch (code) {
-      case lir_shl:  __ shl(dest_reg, left_reg, t1); __ sxt4(dest_reg, dest_reg); break;
-      case lir_shr:  __ shr(dest_reg, left_reg, t1); break;   // sign-extended in, so exact
-      case lir_ushr: __ zxt4(t2, left_reg); __ shru(dest_reg, t2, t1); __ sxt4(dest_reg, dest_reg); break;
+      case lir_shl:  __ shl(dest_reg, left_reg, t1); int_result(dest_reg); break;
+      case lir_shr:  __ shr(dest_reg, int_operand(left_reg), t1); break;
+      case lir_ushr: __ zxt4(t2, left_reg); __ shru(dest_reg, t2, t1); int_result(dest_reg); break;
       default: ShouldNotReachHere();
     }
   } else if (dest->is_double_cpu()) {
@@ -1510,8 +1561,8 @@ void LIR_Assembler::shift_op(LIR_Code code, LIR_Opr left, jint count, LIR_Opr de
     count &= 0x1f;
     if (count != 0) {
       switch (code) {
-        case lir_shl:  __ shl_imm(dest_reg, left_reg, count); __ sxt4(dest_reg, dest_reg); break;
-        case lir_shr:  __ shr_imm(dest_reg, left_reg, count); break;
+        case lir_shl:  __ shl_imm(dest_reg, left_reg, count); int_result(dest_reg); break;
+        case lir_shr:  __ extr(dest_reg, left_reg, count, 32 - count); break;   // reads bits 0-31 only
         case lir_ushr: __ extr_u(dest_reg, left_reg, count, 32 - count); break;
         default: ShouldNotReachHere();
       }
@@ -1697,7 +1748,7 @@ void LIR_Assembler::negate(LIR_Opr left, LIR_Opr dest, LIR_Opr tmp) {
   if (left->is_single_cpu()) {
     assert(dest->is_single_cpu(), "expect single result reg");
     __ neg(dest->as_register(), left->as_register());
-    __ sxt4(dest->as_register(), dest->as_register());
+    int_result(dest->as_register());
   } else if (left->is_double_cpu()) {
     assert(dest->is_double_cpu(), "expect double result reg");
     __ neg(dest->as_register_lo(), left->as_register_lo());
@@ -1742,7 +1793,7 @@ void LIR_Assembler::rt_call(LIR_Opr result, address dest, const LIR_OprList* arg
 
   if (is_c && result->is_valid()) {
     if (result->is_single_cpu() && result->type() == T_INT) {
-      __ sxt4(result->as_register(), result->as_register());
+      int_result(result->as_register());
     } else if (result->is_single_fpu()) {
       __ fnorm_s(result->as_float_reg(), result->as_float_reg());
     }

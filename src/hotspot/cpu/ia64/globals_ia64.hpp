@@ -132,6 +132,10 @@ define_pd_global(intx, InlineSmallCode, 1000);
                                                                                  \
   product(bool, UseBundleScheduling, false, DIAGNOSTIC,                          \
           "Reorder packable instructions within a basic block before packing " \
-          "(BUNDLING.md, Stage 3)")
+          "(BUNDLING.md, Stage 3)")                                            \
+                                                                                 \
+  product(bool, C1LazyIntExtension, false, DIAGNOSTIC,                           \
+          "C1 leaves the upper 32 bits of an int register undefined and "      \
+          "sign-extends only where a 64-bit value is consumed")
 
 #endif // CPU_IA64_GLOBALS_IA64_HPP

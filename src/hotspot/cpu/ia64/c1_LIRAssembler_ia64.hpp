@@ -95,6 +95,15 @@ private:
   // The value of a constant operand in a register: r0 for zero, else t1.
   Register const_reg(LIR_Opr opr);
 
+  // The int model (c1_LIRAssembler_ia64.cpp, top): an operation whose int
+  // result can carry out of the low 32 bits calls int_result, which
+  // re-extends only when C1LazyIntExtension is off. Consumers that need the
+  // full 64 bits extend explicitly, which is correct under either model.
+  void int_result(Register r);
+  // A consumer's int operand, sign-extended in place when ints are lazy (the
+  // int value is unchanged); returns it.
+  Register int_operand(Register r);
+
   void logic_op_reg(Register dst, Register left, Register right, LIR_Code code);
 
 public:

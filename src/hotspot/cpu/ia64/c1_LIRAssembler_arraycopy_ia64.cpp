@@ -176,6 +176,11 @@ void LIR_Assembler::emit_arraycopy(LIR_OpArrayCopy* op) {
   Register length = op->length()->as_register();
   Register tmp = op->tmp()->as_register();
 
+  // The checks and the address arithmetic below are 64-bit.
+  int_operand(src_pos);
+  int_operand(dst_pos);
+  int_operand(length);
+
   CodeStub* stub = op->stub();
   int flags = op->flags();
   BasicType basic_type = default_type != nullptr ? default_type->element_type()->basic_type() : T_ILLEGAL;

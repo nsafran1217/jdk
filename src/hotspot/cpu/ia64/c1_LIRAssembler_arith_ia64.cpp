@@ -37,8 +37,9 @@
 
 #define __ _masm->
 
-// Integer arithmetic keeps ints sign-extended (c1_LIRAssembler_ia64.cpp): an
-// int result that can carry out of the low 32 bits is re-extended with sxt4.
+// Integer arithmetic follows the int model (c1_LIRAssembler_ia64.cpp): an
+// int result that can carry out of the low 32 bits goes through int_result
+// (re-extended unless C1LazyIntExtension).
 // IA-64 has no integer divide: division by a power-of-two constant is shifts,
 // anything else MacroAssembler::java_div_rem's inline FP-unit sequence. The
 // divisor-is-zero check comes before, from the LIRGenerator.
@@ -76,13 +77,16 @@ void LIR_Assembler::arithmetic_idiv(LIR_Code code, LIR_Opr left, LIR_Opr right, 
   Register lreg = left->as_register();
   Register dreg = result->as_register();
   bool is_irem = (code == lir_irem);
+  // Both paths divide 64-bit values.
+  int_operand(lreg);
   if (right->is_constant()) {
     int64_t c = right->as_constant_ptr()->as_jint();
     div_rem_by_power_of_2(_masm, dreg, lreg, c, is_irem);
   } else {
-    __ java_div_rem(dreg, lreg, right->as_register(), is_irem);
+    Register rreg = int_operand(right->as_register());
+    __ java_div_rem(dreg, lreg, rreg, is_irem);
     // MIN_VALUE / -1 is 2^31 here; as an int it is MIN_VALUE again.
-    __ sxt4(dreg, dreg);
+    int_result(dreg);
   }
 }
 
@@ -90,12 +94,12 @@ void LIR_Assembler::arith_op_single_cpu_right_constant(LIR_Code code, LIR_Opr le
                                                        Register lreg, Register dreg) {
   int64_t c = right->as_constant_ptr()->as_jint();
   switch (code) {
-    case lir_add: __ add_imm(dreg, lreg, c, t1); __ sxt4(dreg, dreg); break;
-    case lir_sub: __ add_imm(dreg, lreg, -c, t1); __ sxt4(dreg, dreg); break;
+    case lir_add: __ add_imm(dreg, lreg, c, t1); int_result(dreg); break;
+    case lir_sub: __ add_imm(dreg, lreg, -c, t1); int_result(dreg); break;
     case lir_mul:
       __ mov_immediate(t1, c);
       __ mul(dreg, lreg, t1);
-      __ sxt4(dreg, dreg);
+      int_result(dreg);
       break;
     default: ShouldNotReachHere();
   }
@@ -114,7 +118,7 @@ void LIR_Assembler::arith_op_single_cpu(LIR_Code code, LIR_Opr left, LIR_Opr rig
       default:      ShouldNotReachHere();
     }
     if (dest->type() == T_INT) {
-      __ sxt4(dreg, dreg);
+      int_result(dreg);
     }
   } else if (right->is_constant()) {
     arith_op_single_cpu_right_constant(code, left, right, lreg, dreg);
@@ -127,7 +131,7 @@ void LIR_Assembler::arith_op_single_cpu(LIR_Code code, LIR_Opr left, LIR_Opr rig
       case lir_mul: __ mul(dreg, lreg, t2); break;
       default:      ShouldNotReachHere();
     }
-    __ sxt4(dreg, dreg);
+    int_result(dreg);
   } else {
     ShouldNotReachHere();
   }
