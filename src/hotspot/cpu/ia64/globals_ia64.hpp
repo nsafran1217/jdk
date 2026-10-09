@@ -138,7 +138,7 @@ define_pd_global(intx, InlineSmallCode, 1000);
           "C1 leaves the upper 32 bits of an int register undefined and "      \
           "sign-extends only where a 64-bit value is consumed")              \
                                                                                  \
-  product(bool, UsePollWordRegister, false, DIAGNOSTIC,                          \
+  product(bool, UsePollWordRegister, true, DIAGNOSTIC,                           \
           "C1 code keeps &JavaThread::_poll_word in r7, so a loop's "          \
           "safepoint poll is one load shorter")
 
