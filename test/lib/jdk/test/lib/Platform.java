@@ -220,6 +220,10 @@ public class Platform {
         return isArch("ppc.*");
     }
 
+    public static boolean isIA64() {
+        return isArch("ia64");
+    }
+
     // Returns true for IBM z System running linux.
     public static boolean isS390x() {
         return isArch("s390.*") || isArch("s/390.*") || isArch("zArch_64");
