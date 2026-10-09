@@ -128,6 +128,10 @@ define_pd_global(intx, InlineSmallCode, 1000);
                                                                                  \
   product(bool, UseBundlePacking, true, DIAGNOSTIC,                              \
           "Pack up to three instructions per bundle in compiled code "          \
-          "(BUNDLING.md, Stage 2)")
+          "(BUNDLING.md, Stage 2)")                                            \
+                                                                                 \
+  product(bool, UseBundleScheduling, false, DIAGNOSTIC,                          \
+          "Reorder packable instructions within a basic block before packing " \
+          "(BUNDLING.md, Stage 3)")
 
 #endif // CPU_IA64_GLOBALS_IA64_HPP

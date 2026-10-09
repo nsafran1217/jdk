@@ -371,6 +371,7 @@ class Assembler : public AbstractAssembler {
   // Emit a whole single-instruction bundle. |d| == nullptr makes it a
   // barrier. Closes any open packed bundle first.
   void emit_bundle(ia64::Bundle b, const Deps* d = nullptr) {
+    flush_window();
     _ob_open = false;
     if (d != nullptr && UseStopElision &&
         _last_sect == code_section() && _last_off == raw_offset() - BytesPerBundle &&
@@ -442,7 +443,7 @@ class Assembler : public AbstractAssembler {
     NoPackScope(Assembler* a) : PackScope(a, false) {}
   };
 
-  void close_bundle() { _ob_open = false; }
+  void close_bundle() { flush_window(); _ob_open = false; }
 
   // Packing for everything this assembler emits outside explicit scopes
   // (C1_MacroAssembler turns it on for compiled code).
@@ -542,7 +543,130 @@ class Assembler : public AbstractAssembler {
     *(uint64_t*)(p + 8) = b.hi;
   }
 
+  // ---- list scheduling (BUNDLING.md, Stage 3) -------------------------------
+  //
+  // Under UseBundleScheduling, packable instructions are held in a window
+  // and reordered before packing, so independent work fills the groups a
+  // dependency chain leaves half empty. The window is flushed -- scheduled
+  // and handed to the packer -- by everything that ends packing's open
+  // bundle (every position observer, branches, barriers, scope changes), so
+  // nothing recorded ever points into it. The order is constrained by:
+  //  - RAW and WAW: the consumer goes after the producer, in a later group;
+  //  - WAR: the writer goes after the reader (the same group is fine);
+  //  - "ordered" instructions keep their relative order: memory and system
+  //    instructions (Deps describe registers, not memory or ARs), and
+  //    writes of sp or fp, which a fault handler reads (stack bang);
+  //  - the window's first instruction stays first: a position recorded
+  //    just before it (an implicit null check's pc) names it, and nothing
+  //    after it in program order may execute before it faults.
+  static const int kSchedWindow = 24;
+  struct WinInsn { ia64::Insn insn; Unit u; Deps d; bool ordered; };
+  WinInsn _win[kSchedWindow];
+  int     _win_n = 0;
+
+  static bool is_ordered(Unit u, ia64::Insn insn, const Deps& d) {
+    int op = (int)((insn >> 37) & 0xf);
+    switch (u) {
+      case U_M: if (op < 8) return true; break;           // ld/st/fetchadd/xchg/getf/setf/system
+      case U_I: if (op == 0) {                            // I misc: only sxt/zxt/czx are plain ALU
+                  int x3 = (int)((insn >> 33) & 0x7), x6 = (int)((insn >> 27) & 0x3f);
+                  if (!(x3 == 0 && x6 >= 0x10 && x6 <= 0x1f)) return true;
+                }
+                break;
+      case U_F: if (op <= 1) return true; break;          // F misc (fsetc, fclrf, frcpa, ...)
+      case U_A: break;
+    }
+    for (int i = 0; i < d.nwr; i++) {
+      if (d.wr_cls[i] == Deps::GR && (d.wr_num[i] == 12 || d.wr_num[i] == 4)) return true;  // sp, fp
+    }
+    return false;
+  }
+
+  static bool reads(const Deps& d, int c, int n) {
+    for (int i = 0; i < d.nrd; i++) if (d.rd_cls[i] == c && d.rd_num[i] == n) return true;
+    return false;
+  }
+  static bool writes(const Deps& d, int c, int n) {
+    for (int i = 0; i < d.nwr; i++) if (d.wr_cls[i] == c && d.wr_num[i] == n) return true;
+    return false;
+  }
+  // a precedes b in program order: must it stay before? strict = RAW/WAW.
+  static bool depends(const WinInsn& a, const WinInsn& b, bool* strict) {
+    *strict = false;
+    for (int i = 0; i < b.d.nrd; i++) if (writes(a.d, b.d.rd_cls[i], b.d.rd_num[i])) { *strict = true; return true; }
+    for (int i = 0; i < b.d.nwr; i++) if (writes(a.d, b.d.wr_cls[i], b.d.wr_num[i])) { *strict = true; return true; }
+    for (int i = 0; i < b.d.nwr; i++) if (reads(a.d, b.d.wr_cls[i], b.d.wr_num[i])) return true;
+    return a.ordered && b.ordered;
+  }
+
+  void flush_window() {
+    if (_win_n == 0) return;
+    const int n = _win_n;
+    _win_n = 0;                         // pack_unit below must not re-enter
+    uint32_t pred[kSchedWindow], strict_succ[kSchedWindow];
+    for (int j = 0; j < n; j++) { pred[j] = 0; strict_succ[j] = 0; }
+    for (int j = 1; j < n; j++) {
+      pred[j] |= 1;                     // the first instruction stays first
+      for (int i = 0; i < j; i++) {
+        bool strict;
+        if (depends(_win[i], _win[j], &strict)) {
+          pred[j] |= 1u << i;
+          if (strict) strict_succ[i] |= 1u << j;
+        }
+      }
+    }
+    int height[kSchedWindow];           // longest RAW/WAW chain to the end
+    for (int i = n - 1; i >= 0; i--) {
+      height[i] = 1;
+      for (int j = i + 1; j < n; j++) {
+        if (((strict_succ[i] >> j) & 1) && height[j] + 1 > height[i]) height[i] = height[j] + 1;
+      }
+    }
+    uint32_t done = 0;
+    uint64_t gw[4][2] = {};             // registers written in the group being formed
+    int order[kSchedWindow];
+    for (int k = 0; k < n; k++) {
+      int best = -1;
+      for (int pass = 0; pass < 2 && best < 0; pass++) {
+        if (pass == 1) memset(gw, 0, sizeof(gw));    // nothing fits: start a new group
+        for (int j = 0; j < n; j++) {
+          if (((done >> j) & 1) || (pred[j] & ~done) != 0) continue;
+          const Deps& d = _win[j].d;
+          bool clash = false;
+          for (int i = 0; i < d.nrd && !clash; i++) clash = (gw[d.rd_cls[i]][d.rd_num[i] >> 6] >> (d.rd_num[i] & 63)) & 1;
+          for (int i = 0; i < d.nwr && !clash; i++) clash = (gw[d.wr_cls[i]][d.wr_num[i] >> 6] >> (d.wr_num[i] & 63)) & 1;
+          if (clash) continue;
+          if (best < 0 || height[j] > height[best]) best = j;
+        }
+      }
+      assert(best >= 0, "a ready instruction always fits an empty group");
+      order[k] = best;
+      done |= 1u << best;
+      const Deps& d = _win[best].d;
+      for (int i = 0; i < d.nwr; i++) gw[d.wr_cls[i]][d.wr_num[i] >> 6] |= (uint64_t)1 << (d.wr_num[i] & 63);
+    }
+    for (int k = 0; k < n; k++) {
+      const WinInsn& w = _win[order[k]];
+      pack_unit(w.u, w.insn, w.d);
+    }
+  }
+
   void emit_unit(Unit u, ia64::Insn insn, const Deps& d) {
+    if (_pack_depth > 0 && UseBundleScheduling) {
+      if (d.is_branch || d.keep_stop) {
+        flush_window();
+        pack_unit(u, insn, d);
+        return;
+      }
+      if (_win_n == kSchedWindow) flush_window();
+      WinInsn& w = _win[_win_n++];
+      w.insn = insn; w.u = u; w.d = d; w.ordered = is_ordered(u, insn, d);
+      return;
+    }
+    pack_unit(u, insn, d);
+  }
+
+  void pack_unit(Unit u, ia64::Insn insn, const Deps& d) {
     if (_pack_depth == 0) {
       ia64::Bundle b = (u == U_I) ? ia64::BundleI(insn) :
                        (u == U_F) ? ia64::BundleF(insn) : ia64::BundleM(insn);
@@ -797,12 +921,16 @@ class Assembler : public AbstractAssembler {
   // IP-relative, to a label: +/-16 MiB, measured in bundles from this one.
   // Enough for any branch within one blob; anything that may be farther (a
   // call into another blob, a stub) goes through a branch register instead.
+  // target() records an unbound label's patch site at AbstractAssembler's
+  // own position, which does not flush the scheduling window: flush first.
   void br_cond(Label& L, QP) {
+    close_bundle();
     address dest = target(L);
     emit_b(ia64::BrCondRel(bundle_disp(dest), Q), D().r(qp).branch());
   }
   void br_call(BranchRegister b1, Label& L, QP) {
     _branch_reg_epoch++;
+    close_bundle();
     address dest = target(L);
     emit_b(ia64::BrCallRel(b1.encoding(), bundle_disp(dest), Q));
   }
