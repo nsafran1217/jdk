@@ -126,7 +126,7 @@ define_pd_global(intx, InlineSmallCode, 1000);
           "Let independent consecutive instructions share an instruction "      \
           "group by omitting the stop between them (BUNDLING.md, Stage 1)")      \
                                                                                  \
-  product(bool, UseBundlePacking, false, DIAGNOSTIC,                             \
+  product(bool, UseBundlePacking, true, DIAGNOSTIC,                              \
           "Pack up to three instructions per bundle in compiled code "          \
           "(BUNDLING.md, Stage 2)")
 
