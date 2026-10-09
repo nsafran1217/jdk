@@ -185,9 +185,67 @@ Register LIR_Assembler::stack_slot_addr_reg(int index, int adjust) {
 // ---- entries and exits ------------------------------------------------------
 
 void LIR_Assembler::osr_entry() {
-  // On-stack replacement needs SharedRuntime::OSR_migration_begin's buffer
-  // handed over in compiled code; not supported yet (C1-4).
-  Unimplemented();
+  offsets()->set_value(CodeOffsets::OSR_Entry, code_offset());
+  BlockBegin* osr_entry = compilation()->hir()->osr_entry();
+  guarantee(osr_entry != nullptr, "null osr_entry!");
+  ValueStack* entry_state = osr_entry->state();
+  int number_of_locks = entry_state->locks_size();
+
+  // we jump here if osr happens with the interpreter
+  // state set up to continue at the beginning of the
+  // loop that triggered osr - in particular, we have
+  // the following registers setup:
+  //
+  // j_rarg0: osr buffer
+  //   (TemplateTable::branch; b0 = the return address into the
+  //   interpreted frame's caller)
+
+  //build frame
+  __ build_frame(initial_frame_size_in_bytes(), bang_size_in_bytes());
+
+  // OSR buffer is
+  //
+  // locals[nlocals-1..0]
+  // monitors[0..number_of_locks]
+  //
+  // locals is a direct copy of the interpreter frame so in the osr buffer
+  // so first slot in the local array is the last local from the interpreter
+  // and last slot is local[0] (receiver) from the interpreter
+  //
+  // Similarly with locks. The first lock slot in the osr buffer is the nth lock
+  // from the interpreter frame, the nth lock slot in the osr buffer is 0th lock
+  // in the interpreter frame (the method lock if a sync method)
+
+  // Initialize monitors in the compiled activation.
+  // All other registers are dead at this point and the locals will be
+  // copied into place by code emitted in the IR.
+
+  Register OSR_buf = osrBufferPointer()->as_pointer_register();
+  {
+    assert(frame::interpreter_frame_monitor_size() == BasicObjectLock::size(), "adjust code below");
+    int monitor_offset = BytesPerWord * method()->max_locals() +
+      (2 * BytesPerWord) * (number_of_locks - 1);
+    // SharedRuntime::OSR_migration_begin() packs BasicObjectLocks in
+    // the OSR buffer using 2 word entries: first the lock and then
+    // the oop.
+    for (int i = 0; i < number_of_locks; i++) {
+      int slot_offset = monitor_offset - ((i * 2) * BytesPerWord);
+#ifdef ASSERT
+      // verify the interpreter's monitor has a non-null object
+      {
+        Label L;
+        __ ld8(t2, Address(OSR_buf, slot_offset + 1 * BytesPerWord));
+        __ bnez(t2, L);
+        __ stop("locked object is null");
+        __ bind(L);
+      }
+#endif // ASSERT
+      __ ld8(t2, Address(OSR_buf, slot_offset + 0));
+      __ st8(frame_map()->address_for_monitor_lock(i), t2);
+      __ ld8(t2, Address(OSR_buf, slot_offset + 1 * BytesPerWord));
+      __ st8(frame_map()->address_for_monitor_object(i), t2);
+    }
+  }
 }
 
 // inline cache check; done before the frame is built.

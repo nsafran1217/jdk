@@ -64,16 +64,11 @@
 #define BLOCK_COMMENT(str) __ block_comment(str)
 #endif
 
-// Shared runtime for IA-64, milestone 1 (core variant).
-//
-// What the template interpreter needs is real: the calling conventions and
-// generate_throw_exception (the interpreter's stack-overflow check jumps to
-// throw_StackOverflowError). Everything that exists only for compiled code
-// -- the i2c/c2i adapters' bodies, the deoptimization, safepoint-poll and
-// call-resolution blobs, the JFR stubs, native wrappers -- is generated as a
-// trap that names itself, so the blobs exist (shared code compares against
-// and walks them at startup) but executing one stops the VM with a clear
-// message. They arrive with C1.
+// Shared runtime for IA-64: the calling conventions, the i2c/c2i adapters,
+// and the blobs compiled code needs (call resolution, safepoint polls,
+// deoptimization, the method-handle intrinsics' wrappers). Still traps: the
+// JFR stubs (C2 only) and JNI wrappers for real native methods, which run
+// interpreted (PreferInterpreterNativeStubs).
 //
 // Every stub here is generated in a buffer and then copied into the code
 // cache, so it must not record its own address absolutely: pcs are taken
@@ -695,27 +690,212 @@ int Deoptimization::last_frame_adjust(int callee_parameters, int callee_locals) 
 }
 
 // ---------------------------------------------------------------------------
-// Blobs for compiled code: present, but traps.
+// Blobs for compiled code.
 
+// The deoptimization blob: replaces a compiled frame by the interpreter
+// frames its debug info describes (after riscv). Entry points:
+//
+//   unpack                 the deopt handler of an nmethod whose frame was
+//                          marked: b0 = the handler's own address
+//                          (LIR_Assembler::emit_deopt_handler);
+//   unpack_with_reexecution  a C1 runtime stub with the compiled frame
+//                          current: b0 = the return address into it;
+//   unpack_with_exception  r8 = exception oop, r28 = throwing pc;
+//   unpack_with_exception_in_tls  the same two already in the JavaThread.
+//
+// Each lays down RegisterSaver's frame directly below the compiled frame's
+// sp (its fp is that sp), which is where fetch_unroll_info looks for the
+// frame being deoptimized and the registers its debug info names. r6/r7 --
+// the interpreter's Rbcp/Resp, preserved by C and unused by compiled code,
+// and reloaded by the interpreter's deopt entry -- carry the exec mode and
+// the UnrollBlock across the C calls. The r8/f8 results travel bit-exactly
+// (st8, stf.spill).
 void SharedRuntime::generate_deopt_blob() {
   ResourceMark rm;
   const char* name = SharedRuntime::stub_name(SharedStubId::deopt_id);
-  CodeBuffer buffer(name, 2048, 1024);
+  CodeBuffer buffer(name, 16384, 1024);
   MacroAssembler* masm = new MacroAssembler(&buffer);
+  int frame_size_in_words = -1;
+  OopMap* map = nullptr;
   OopMapSet* oop_maps = new OopMapSet();
 
-  int unpack_offset = __ offset();
-  trap(masm, "IA-64: deoptimization blob (unpack)");
-  int reexecute_offset = __ offset();
-  trap(masm, "IA-64: deoptimization blob (reexecute)");
-  int exception_offset = __ offset();
-  trap(masm, "IA-64: deoptimization blob (exception)");
-  int exception_in_tls_offset = __ offset();
-  trap(masm, "IA-64: deoptimization blob (exception in TLS)");
+  const Register exec_mode = r6;
+  const Register unroll    = r7;
+  const int r8_off = RegisterSaver::gr_offset_in_bytes(r8);
+  const int f8_off = RegisterSaver::fr_spill_off;   // f8 is the first saved FPR
 
+  int start = __ offset();
+  Label cont;
+
+  // Normal deoptimization.
+  map = RegisterSaver::save_live_registers(masm, &frame_size_in_words);
+  __ mov_immediate(exec_mode, Deoptimization::Unpack_deopt);
+  __ j(cont);
+
+  // Reexecute case: the return address is the pc whose bci is re-executed.
+  int reexecute_offset = __ offset() - start;
+  (void) RegisterSaver::save_live_registers(masm, &frame_size_in_words);
+  __ mov_immediate(exec_mode, Deoptimization::Unpack_reexecute);
+  __ j(cont);
+
+  // Exception case: all registers are dead except the exception oop and pc,
+  // which go to the JavaThread; then as unpack_with_exception_in_tls.
+  int exception_offset = __ offset() - start;
+  __ st8(Address(Rthread, JavaThread::exception_pc_offset()), Rexception_pc);
+  __ st8(Address(Rthread, JavaThread::exception_oop_offset()), Rexception);
+
+  int exception_in_tls_offset = __ offset() - start;
+  // The return address enter() stores is patched below with the throwing pc.
+  (void) RegisterSaver::save_live_registers(masm, &frame_size_in_words);
+  __ mov_immediate(exec_mode, Deoptimization::Unpack_exception);
+  __ ld8(t2, Address(Rthread, JavaThread::exception_pc_offset()));
+  __ st8(Address(fp, frame::return_addr_offset * wordSize), t2);
+  __ st8(Address(Rthread, JavaThread::exception_pc_offset()), zr);
+#ifdef ASSERT
+  {
+    // verify that there is no pending exception
+    Label no_pending_exception;
+    __ ld8(t2, Address(Rthread, Thread::pending_exception_offset()));
+    __ beqz(t2, no_pending_exception);
+    __ stop("must not have pending exception here");
+    __ bind(no_pending_exception);
+  }
+#endif
+
+  __ bind(cont);
+
+  // UnrollBlock* fetch_unroll_info(JavaThread* thread, int exec_mode).
+  // It needs the last Java frame (no fp: the compiled frame is found from
+  // sp) and cannot block, so no GC can happen.
+  {
+    Label retaddr;
+    __ set_last_Java_frame(sp, noreg, retaddr, t2);
+    __ mov(c_rarg0, Rthread);
+    __ mov(c_rarg1, exec_mode);
+    __ call_c(CAST_FROM_FN_PTR(address, Deoptimization::fetch_unroll_info));
+    __ bind(retaddr);
+    // An oopmap telling fetch_unroll_info where to find any register it
+    // might need.
+    oop_maps->add_gc_map(__ offset() - start, map);
+  }
+  __ reset_last_Java_frame(false);
+
+  __ mov(unroll, r8);
+
+  __ ld4(exec_mode, Address(unroll, Deoptimization::UnrollBlock::unpack_kind_offset()));
+  Label noException;
+  __ cmp4_eq_imm(ptmp0, ptmp1, Deoptimization::Unpack_exception, exec_mode);
+  __ br_cond(noException, ptmp1);   // Was exception pending?
+  __ ld8(Rexception, Address(Rthread, JavaThread::exception_oop_offset()));
+  __ st8(Address(Rthread, JavaThread::exception_oop_offset()), zr);
+  __ st8(Address(Rthread, JavaThread::exception_pc_offset()), zr);
+  __ verify_oop(Rexception);
+  // Overwrite the result register with the exception oop.
+  __ st8(Address(sp, r8_off), Rexception);
+  __ bind(noException);
+
+  // Only register save data is on the stack. Restore the result registers;
+  // everything else is either dead or captured in the vframeArray.
+  __ adds(t2, f8_off, sp);
+  __ ldf_fill(f8, t2);
+  __ ld8(r8, Address(sp, r8_off));
+
+  // Pop the self-frame and the deoptimized frame (youngest to oldest):
+  //   1: self-frame (this blob's)
+  //   2: deoptimized frame
+  //   3: caller of the deoptimized frame (could be compiled/interpreted)
+  // The deoptimized frame starts at our fp; its own linkage is at its top.
+  // Everything is loaded before sp moves up: there is no red zone.
+  __ ld4(t3, Address(unroll, Deoptimization::UnrollBlock::size_of_deoptimized_frame_offset()));
+  __ add(t3, fp, t3);                                         // frame 3's sp
+  __ ld8(t4, Address(t3, frame::return_addr_offset * wordSize));  // return into frame 3
+  __ ld8(t2, Address(t3, frame::link_offset * wordSize));         // frame 3's fp
+  __ mov(sp, t3);
+  __ mov(fp, t2);
+
+  // Load the arrays of frame pcs and frame sizes, and the frame count.
+  const Register pcs    = r14;
+  const Register sizes  = r15;
+  const Register count  = r16;
+  const Register sender_sp = r17;
+  __ ld8(pcs,   Address(unroll, Deoptimization::UnrollBlock::frame_pcs_offset()));
+  __ ld8(sizes, Address(unroll, Deoptimization::UnrollBlock::frame_sizes_offset()));
+  __ ld4(count, Address(unroll, Deoptimization::UnrollBlock::number_of_frames_offset()));
+
+  // Now adjust the caller's stack to make up for the extra locals but
+  // record the original sp so that we can save it in the skeletal
+  // interpreter frame and the stack walking of interpreter_sender will get
+  // the unextended sp value and not the "real" sp value.
+  __ mov(sender_sp, sp);
+  __ ld4(t2, Address(unroll, Deoptimization::UnrollBlock::caller_adjustment_offset()));
+  __ sub(sp, sp, t2);
+
+  // Push interpreter frames in a loop. Each gets enter()'s linkage -- the
+  // return address frame_pcs[i] and the current fp -- at its top, as an
+  // interpreted frame's prologue would leave it (FRAME-DESIGN.md 4.3).
+  Label loop;
+  __ bind(loop);
+  __ ld8_inc(t2, sizes, wordSize);          // frame size in bytes
+  __ ld8_inc(t4, pcs, wordSize);            // its return address
+  __ mov(t3, sp);                           // the new frame's fp
+  __ sub(sp, sp, t2);
+  __ adds(t2, frame::return_addr_offset * wordSize, t3);
+  __ Assembler::st8(t2, t4);
+  __ adds(t2, frame::link_offset * wordSize, t3);
+  __ Assembler::st8(t2, fp);
+  __ mov(fp, t3);
+  // This value is corrected by layout_activation_impl
+  __ st8(Address(fp, frame::interpreter_frame_last_sp_offset * wordSize), zr);
+  __ st8(Address(fp, frame::interpreter_frame_sender_sp_offset * wordSize), sender_sp); // Make it walkable
+  __ mov(sender_sp, sp);                    // Pass sender_sp to next frame
+  __ adds(count, -1, count);
+  __ bnez(count, loop);
+
+  // Re-push the self-frame, returning to the youngest frame's continuation.
+  __ ld8(t4, Address(pcs, 0));
+  __ mov_to_br(breturn, t4);
+  __ enter();
+  // A full sized register save area
+  __ add_imm(sp, sp, -(int)RegisterSaver::save_bytes);
+
+  // Restore frame locals after moving the frame
+  __ adds(t2, f8_off, sp);
+  __ stf_spill(t2, f8);
+  __ st8(Address(sp, r8_off), r8);
+
+  // void Deoptimization::unpack_frames(JavaThread* thread, int exec_mode).
+  // Fp is set because the frames look interpreted now. The recorded pc only
+  // needs to point into this blob.
+  {
+    Label retaddr;
+    __ set_last_Java_frame(sp, fp, retaddr, t2);
+    __ mov(c_rarg0, Rthread);
+    __ mov(c_rarg1, exec_mode);
+    __ call_c(CAST_FROM_FN_PTR(address, Deoptimization::unpack_frames));
+    __ bind(retaddr);
+    // Set an oopmap for the call site
+    oop_maps->add_gc_map(__ offset() - start,
+                         new OopMap(frame_size_in_words * VMRegImpl::slots_per_word, 0));
+  }
+
+  // Clear fp AND pc
+  __ reset_last_Java_frame(true);
+
+  // Collect return values
+  __ adds(t2, f8_off, sp);
+  __ ldf_fill(f8, t2);
+  __ ld8(r8, Address(sp, r8_off));
+
+  // Pop self-frame and jump to the interpreter.
+  __ leave();
+  __ ret();
+
+  // Make sure all code is generated
   masm->flush();
-  _deopt_blob = DeoptimizationBlob::create(&buffer, oop_maps, unpack_offset, exception_offset,
-                                           reexecute_offset, MacroAssembler::enter_frame_words());
+
+  _deopt_blob = DeoptimizationBlob::create(&buffer, oop_maps, 0, exception_offset, reexecute_offset,
+                                           frame_size_in_words);
+  assert(_deopt_blob != nullptr, "create deoptimization blob fail!");
   _deopt_blob->set_unpack_with_exception_in_tls_offset(exception_in_tls_offset);
 }
 

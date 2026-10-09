@@ -1700,11 +1700,45 @@ void TemplateTable::branch(bool is_jsr, bool is_wide) {
                CAST_FROM_FN_PTR(address,
                                 InterpreterRuntime::frequency_counter_overflow),
                R12);
-    // Rtos: osr nmethod (osr ok) or null (osr not possible). With no
-    // compiler it is always null; on-stack replacement into compiled code
-    // arrives with C1.
-    __ beqz(Rtos, dispatch);
-    __ stop("IA-64: on-stack replacement not yet supported");
+    // Rtos: osr nmethod (osr ok) or null (osr not possible)
+    __ beqz(Rtos, dispatch);     // test result -- no osr if null
+    // nmethod may have been invalidated (VM may block upon call_VM return)
+    __ ld1(t2, Address(Rtos, nmethod::state_offset()));
+    __ cmp_eq_imm(ptmp0, ptmp1, nmethod::in_use, t2);
+    __ br_cond(dispatch, ptmp1);
+
+    // We have the address of an on stack replacement routine in Rtos. We
+    // need to prepare to execute the OSR method. First we must migrate the
+    // locals and monitors off of the stack.
+    //
+    // IA-64: no preserved register is free across the call (r4-r7 are fp,
+    // Rthread, Rbcp and Resp, and the expression stack must stay empty for
+    // OSR_migration_begin), so the nmethod waits in the frame's mdp slot,
+    // unused without interpreter profiling (guaranteed above).
+    const Address nmethod_slot(fp, frame::interpreter_frame_mdp_offset * wordSize);
+    __ st8(nmethod_slot, Rtos);
+
+    JFR_ONLY(__ enter_jfr_critical_section();)
+
+    __ call_VM(noreg, CAST_FROM_FN_PTR(address, SharedRuntime::OSR_migration_begin));
+
+    // r8 is the OSR buffer: move it to the expected parameter location
+    __ mov(j_rarg0, r8);
+
+    // remove activation: everything needed is loaded before the frame goes
+    __ ld8(t2, nmethod_slot);
+    __ ld8(t3, Address(fp, frame::interpreter_frame_sender_sp_offset * wordSize));
+    // remove frame anchor; leaves the return address in b0
+    __ leave();
+
+    JFR_ONLY(__ leave_jfr_critical_section();)
+
+    // Ensure compiled code always sees stack at proper alignment
+    __ and_imm(sp, -16, t3);
+
+    // and begin the OSR nmethod
+    __ ld8(t1, Address(t2, nmethod::osr_entry_point_offset()));
+    __ jr(t1);
   }
 }
 

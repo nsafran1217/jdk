@@ -113,6 +113,9 @@ void FrameMap::initialize() {
     i++;
   }
   _init_done = true;
+  // LinearScan processes out0-out7 by their C1 numbers (c1_LinearScan_ia64.hpp).
+  assert(cpu_reg2rnr(out0) == pd_nof_cpu_regs_frame_map - 8 &&
+         cpu_reg2rnr(out7) == pd_nof_cpu_regs_frame_map - 1, "out registers must be numbered last");
 
   for (int enc = 0; enc < Register::number_of_registers; enc++) {
     _gr_oop_opr[enc]      = as_oop_opr(as_Register(enc));

@@ -260,6 +260,14 @@ bool PosixSignals::pd_hotspot_signal_handler(int sig, siginfo_t* info,
         VMError::report_and_die(thread, uc, nullptr, 0, msg, "%s", detail_msg);
 
         ShouldNotReachHere();
+      } else if (sig == SIGILL && nativeInstruction_at(align_down(pc, BytesPerBundle))->is_sigill_not_entrant()) {
+        // Not entrant: the verified entry was patched to a break.m
+        // (NativeJump::patch_verified_entry). Re-dispatch the call; b0 still
+        // holds the caller's return address.
+        if (TraceTraps) {
+          tty->print_cr("trap: not_entrant (SIGILL)");
+        }
+        stub = SharedRuntime::get_handle_wrong_method_stub();
       } else if (sig == SIGSEGV &&
                  MacroAssembler::uses_implicit_null_check((void*)addr)) {
           // Determination of interpreter/vtable stub/compiled code null exception

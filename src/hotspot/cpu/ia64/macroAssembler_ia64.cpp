@@ -871,7 +871,8 @@ void MacroAssembler::safepoint_poll(Label& slow_path, bool at_return, bool acqui
 
 void MacroAssembler::fdiv_s(FloatRegister dst, FloatRegister a, FloatRegister b) {
   const FloatRegister y = f2, e = f3, y1 = f4, y2 = f5;
-  assert_different_registers(a, b, y, e, y1, y2);
+  assert_different_registers(a, y, e, y1, y2);   // a == b is fine (x / x)
+  assert_different_registers(b, y, e, y1, y2);
   const PredicateRegister p = ptmp0;
   frcpa(y, p, a, b);                       // y  = 1 / b, approximately
   fnma (e,  b,  y, f1,   ia64::sf1, p);    // e  = 1 - (b * y)
@@ -886,7 +887,8 @@ void MacroAssembler::fdiv_s(FloatRegister dst, FloatRegister a, FloatRegister b)
 
 void MacroAssembler::fdiv_d(FloatRegister dst, FloatRegister a, FloatRegister b) {
   const FloatRegister y = f2, e = f3, yn = f4, q = f5, r = f6;
-  assert_different_registers(a, b, y, e, yn, q, r);
+  assert_different_registers(a, y, e, yn, q, r);   // a == b is fine (x / x)
+  assert_different_registers(b, y, e, yn, q, r);
   const PredicateRegister p = ptmp0;
   frcpa(y, p, a, b);                       // y  = 1 / b, approximately
   fnma (e,  b,  y,  f1,  ia64::sf1, p);    // e  = 1 - (b * y)

@@ -968,6 +968,11 @@ inline Insn NopM(uint32_t imm21 = 0) {
          (Insn((imm21 >> 20) & 1) << 36);
 }
 inline Insn NopI(uint32_t imm21 = 0) { return NopM(imm21); }
+// break.m imm21 (M37): nop.m with x4 = 0 instead of 1, so a break.m and a
+// nop.m in the same slot of the same template differ only in that slot.
+inline Insn BreakM(uint32_t imm21, uint32_t qp = 0) {
+  return fOp(0) | (Insn(imm21 & 0xfffff) << 6) | (Insn((imm21 >> 20) & 1) << 36) | fQp(qp);
+}
 inline Insn NopF(uint32_t imm21 = 0) { return NopM(imm21); }
 inline Insn NopB(uint32_t imm21 = 0) {
   return fOp(2) | (Insn(imm21 & 0xfffff) << 6) | (Insn((imm21 >> 20) & 1) << 36);

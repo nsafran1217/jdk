@@ -26,8 +26,17 @@
 #ifndef CPU_IA64_C1_LINEARSCAN_IA64_HPP
 #define CPU_IA64_C1_LINEARSCAN_IA64_HPP
 
+// The allocatable registers, the FPRs, and the C argument window out0-out7
+// (C1 numbers 32-39: the end of FrameMap::initialize's fixed list). The C
+// arguments of call_runtime -- oops among them (isInstance, register_
+// finalizer) -- are moved into out0.. by ordinary LIR moves, and LinearScan
+// must track those fixed operands: on riscv/x86 the C argument registers are
+// allocatable and tracked anyway. Processed but never allocated
+// (pd_init_regs_for_alloc).
 inline bool LinearScan::is_processed_reg_num(int reg_num) {
-  return reg_num <= FrameMap::last_cpu_reg() || reg_num >= pd_nof_cpu_regs_frame_map;
+  return reg_num <= FrameMap::last_cpu_reg() ||
+         (reg_num >= pd_nof_cpu_regs_frame_map - 8 && reg_num < pd_nof_cpu_regs_frame_map) ||
+         reg_num >= pd_nof_cpu_regs_frame_map;
 }
 
 inline int LinearScan::num_physical_regs(BasicType type) {

@@ -59,6 +59,10 @@ class NativeInstruction {
   };
 
   bool is_nop() const;
+  // A verified entry made not entrant (NativeJump::patch_verified_entry).
+  // The immediate is in the range Linux reports as SIGILL (ISA-NOTES.md).
+  static const uint32_t not_entrant_break_imm = 0x40000 | 0x5708;
+  bool is_sigill_not_entrant();
   bool is_call() const   { return is_call_at(addr_at(0)); }
   bool is_jump() const;
   bool is_jump_or_nop();

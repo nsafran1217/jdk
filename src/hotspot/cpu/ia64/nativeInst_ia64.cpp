@@ -28,6 +28,7 @@
 #include "nativeInst_ia64.hpp"
 #include "runtime/safepoint.hpp"
 #include "runtime/atomic.hpp"
+#include "runtime/sharedRuntime.hpp"
 #include "utilities/ostream.hpp"
 
 // The sequences recognised here are exactly the ones MacroAssembler emits:
@@ -149,12 +150,33 @@ void NativeJump::verify() {
   assert(is_jump(), "not a jump at " PTR_FORMAT, p2i(addr_at(0)));
 }
 
-// Making an nmethod not entrant patches its verified entry. The core
-// variant's only nmethods are method-handle intrinsic wrappers, which are
-// never made not entrant; the trap-based patch (and its SIGILL handling)
-// arrives with C1.
+// Making an nmethod not entrant patches its verified entry, which is a nop
+// bundle (C1_MacroAssembler::verified_entry, generate_native_wrapper), into
+// the same bundle with break.m in slot 0. Only slot 0's bits change, and
+// they lie in the bundle's low eight bytes, so one aligned 8-byte store makes
+// the change atomically: a thread fetching the bundle sees either the nop or
+// the break. The break arrives as SIGILL, and the signal handler sends the
+// caller to dest, the handle_wrong_method stub (os_linux_ia64.cpp,
+// NativeInstruction::is_sigill_not_entrant).
+static ia64::Bundle not_entrant_bundle() {
+  return ia64::MakeBundle(ia64::tMII_, ia64::BreakM(NativeInstruction::not_entrant_break_imm),
+                          ia64::NopI(), ia64::NopI());
+}
+
+bool NativeInstruction::is_sigill_not_entrant() {
+  return bundle_equals(addr_at(0), not_entrant_bundle());
+}
+
 void NativeJump::patch_verified_entry(address entry, address verified_entry, address dest) {
-  Unimplemented();
+  assert(dest == SharedRuntime::get_handle_wrong_method_stub(), "expected fixed destination of patch");
+  assert(is_aligned(verified_entry, BytesPerBundle), "bundle-aligned");
+  ia64::Bundle* b = (ia64::Bundle*)verified_entry;
+  ia64::Bundle trap = not_entrant_bundle();
+  assert(bundle_equals(verified_entry, ia64::BundleNop()) || bundle_equals(verified_entry, trap),
+         "verified entry must be the nop bundle at " PTR_FORMAT, p2i(verified_entry));
+  assert(trap.hi == ia64::BundleNop().hi, "only the low half may change");
+  Atomic::store(&b->lo, trap.lo);
+  ICache::invalidate_range(verified_entry, BytesPerBundle);
 }
 
 void NativeGeneralJump::insert_unconditional(address code_pos, address entry) {
