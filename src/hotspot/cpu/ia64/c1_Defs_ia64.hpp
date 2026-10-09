@@ -78,9 +78,12 @@ enum {
   pd_first_allocatable_fpu_reg = pd_first_fpu_reg + 8      // f8
 };
 
-// Floats and doubles are stored in their native memory formats (stfs/stfd).
+// A register saver cannot know whether an FPR holds a float or a double, and
+// stfs/stfd need the value to have the store's type, so every saved FPR is
+// stored -- and described to deoptimization -- as a double (RegisterSaver,
+// FRAME-DESIGN.md 11.1). C1's own spills still use stfs for floats.
 enum {
-  pd_float_saved_as_double = false
+  pd_float_saved_as_double = true
 };
 
 enum {

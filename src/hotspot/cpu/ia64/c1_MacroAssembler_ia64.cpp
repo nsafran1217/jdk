@@ -92,22 +92,36 @@ void C1_MacroAssembler::verified_entry(bool breakAtEntry) {
   Unimplemented(); // IA-64 C1: not yet ported (riscv: C1_MacroAssembler::verified_entry)
 }
 
+// A parameter LIR_Assembler::store_parameter left at the caller's sp, read
+// from inside a stub frame, where fp is the caller's sp (enter()):
+//   fp + -2: link
+//      + -1: return address
+//      +  0: argument with offset 0
+//      +  1: argument with offset 1
+// The C1 runtime stubs take their arguments in registers instead
+// (c1_Runtime1_ia64.cpp); this is for code shaped like the other ports.
 void C1_MacroAssembler::load_parameter(int offset_in_words, Register reg) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: C1_MacroAssembler::load_parameter)
+  ld8(reg, Address(fp, offset_in_words * BytesPerWord));
 }
 
 #ifndef PRODUCT
 
 void C1_MacroAssembler::verify_stack_oop(int stack_offset) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: C1_MacroAssembler::verify_stack_oop)
+  // verify_oop is not implemented on IA-64 yet (macroAssembler_ia64.hpp).
 }
 
 void C1_MacroAssembler::verify_not_null_oop(Register r) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: C1_MacroAssembler::verify_not_null_oop)
+  if (!VerifyOops) return;
+  Label not_null;
+  bnez(r, not_null);
+  stop("non-null oop required");
+  bind(not_null);
+  verify_oop(r);
 }
 
+// The flags are named for riscv's registers in the shared declaration; the
+// IA-64 runtime stubs do not call this.
 void C1_MacroAssembler::invalidate_registers(bool inv_x10, bool inv_x9, bool inv_x12, bool inv_x13, bool inv_x14, bool inv_x15) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: C1_MacroAssembler::invalidate_registers)
 }
 #endif // ifndef PRODUCT
 

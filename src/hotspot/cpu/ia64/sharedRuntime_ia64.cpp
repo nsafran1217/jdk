@@ -42,6 +42,7 @@
 #include "oops/klass.inline.hpp"
 #include "oops/method.inline.hpp"
 #include "prims/methodHandles.hpp"
+#include "registerSaver_ia64.hpp"
 #include "runtime/deoptimization.hpp"
 #include "runtime/globals.hpp"
 #include "runtime/jniHandles.hpp"
@@ -78,72 +79,14 @@
 // cache, so it must not record its own address absolutely: pcs are taken
 // with la() (mov r = ip), never with movl.
 
-// Emit a named trap: generation succeeds, execution stops the VM.
 // ---------------------------------------------------------------------------
-// RegisterSaver (FRAME-DESIGN.md 11.1)
-//
-// Saves every register that can hold a live value of compiled code across a
-// call into the runtime, describes them in an OopMap, and restores them. The
-// frame is enter()'s linkage plus a save area below it:
-//
-//   fp ->  caller's sp
-//          return address, caller's fp        (enter(): 4 words incl. scratch)
-//          ...
-//   sp + fr_dbl_off   f8-f31 as memory-format doubles, 8 bytes each: what the
-//                     OopMap points at (deoptimization reads saved FPRs as
-//                     doubles -- pd_float_saved_as_double)
-//   sp + fr_spill_off f8-f31 as 16-byte stf.spill images: what is restored,
-//                     bit-exact for any register value
-//   sp + gr_off       r8-r11, r14-r31
-//   sp + pr_off       all predicates (a safepoint may fall between a C1
-//                     compare and the branch reading p10/p11)
-//   sp + 0            16-byte psABI scratch
-//
-// Not saved: r0, r1 (gp, scratch and never live in generated code), r2/r3 (the
-// MacroAssembler temporaries this code uses), r4-r7 (preserved by C), r12 sp,
-// r13 tp, out0-out7, f2-f7 (internal temporaries), f0/f1.
-class RegisterSaver {
- public:
-  static const int gr_count = 22;
-  static const int fr_first = 8;
-  static const int fr_count = 24;   // f8-f31
+// RegisterSaver (registerSaver_ia64.hpp, FRAME-DESIGN.md 11.1)
 
-  enum {
-    pr_off       = 16,
-    gr_off       = 24,
-    fr_spill_off = 208,                                  // align_up(gr_off + 22 * 8, 16)
-    fr_dbl_off   = fr_spill_off + fr_count * 16,         // 592
-    save_bytes   = fr_dbl_off + fr_count * 8             // 784
-  };
-
-  static int gr_at(int i) {
-    static const int grs[gr_count] = { 8, 9, 10, 11, 14, 15, 16, 17, 18, 19, 20,
-                                       21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31 };
-    return grs[i];
+OopMap* RegisterSaver::save_live_registers(MacroAssembler* masm, int* total_frame_words,
+                                           bool describe_fprs, bool with_enter) {
+  if (with_enter) {
+    __ enter();
   }
-  static int gr_offset_in_bytes(Register r) {
-    for (int i = 0; i < gr_count; i++) {
-      if (gr_at(i) == r->encoding()) return gr_off + i * wordSize;
-    }
-    ShouldNotReachHere();
-    return -1;
-  }
-
-  // Frame size in words, including enter()'s linkage.
-  static int frame_size_in_words() {
-    return MacroAssembler::enter_frame_words() + save_bytes / wordSize;
-  }
-
-  static OopMap* save_live_registers(MacroAssembler* masm, int* total_frame_words);
-  static void restore_live_registers(MacroAssembler* masm);
-};
-
-STATIC_ASSERT(RegisterSaver::fr_spill_off >= RegisterSaver::gr_off + RegisterSaver::gr_count * wordSize);
-STATIC_ASSERT(RegisterSaver::fr_spill_off % 16 == 0);
-STATIC_ASSERT(RegisterSaver::save_bytes % 16 == 0);
-
-OopMap* RegisterSaver::save_live_registers(MacroAssembler* masm, int* total_frame_words) {
-  __ enter();
   __ adds(sp, -(int)save_bytes, sp);
 
   __ mov_from_pr(t0);
@@ -159,40 +102,48 @@ OopMap* RegisterSaver::save_live_registers(MacroAssembler* masm, int* total_fram
     FloatRegister f = as_FloatRegister(fr_first + i);
     __ adds(t1, fr_spill_off + i * 16, sp);
     __ stf_spill(t1, f);
-    // Memory-format copy: fnorm.d makes any float or double value double-typed
-    // (exact); NaNs are copied unchanged (fnorm would quieten a signalling
-    // NaN). See FRAME-DESIGN.md 11.1.
-    __ fmov(f6, f);
-    __ fcmp_unord(ptmp0, ptmp1, f, f);
-    __ fnorm_d(f6, f, ptmp1);
-    __ adds(t1, fr_dbl_off + i * wordSize, sp);
-    __ stfd(t1, f6);
+    if (describe_fprs) {
+      // Memory-format copy: fnorm.d makes any float or double value
+      // double-typed (exact); NaNs are copied unchanged (fnorm would quieten
+      // a signalling NaN). See FRAME-DESIGN.md 11.1.
+      __ fmov(f6, f);
+      __ fcmp_unord(ptmp0, ptmp1, f, f);
+      __ fnorm_d(f6, f, ptmp1);
+      __ adds(t1, fr_dbl_off + i * wordSize, sp);
+      __ stfd(t1, f6);
+    }
   }
 
-  int frame_words = frame_size_in_words();
-  *total_frame_words = frame_words;
-  OopMap* map = new OopMap(frame_words * VMRegImpl::slots_per_word, 0);
+  *total_frame_words = frame_size_in_words();
+  return oop_map(describe_fprs);
+}
+
+OopMap* RegisterSaver::oop_map(bool describe_fprs) {
+  OopMap* map = new OopMap(frame_size_in_words() * VMRegImpl::slots_per_word, 0);
   for (int i = 0; i < gr_count; i++) {
     Register r = as_Register(gr_at(i));
     int slot = (gr_off + i * wordSize) / VMRegImpl::stack_slot_size;
     map->set_callee_saved(VMRegImpl::stack2reg(slot), r->as_VMReg());
     map->set_callee_saved(VMRegImpl::stack2reg(slot + 1), r->as_VMReg()->next());
   }
-  for (int i = 0; i < fr_count; i++) {
-    FloatRegister f = as_FloatRegister(fr_first + i);
-    int slot = (fr_dbl_off + i * wordSize) / VMRegImpl::stack_slot_size;
-    map->set_callee_saved(VMRegImpl::stack2reg(slot), f->as_VMReg());
-    map->set_callee_saved(VMRegImpl::stack2reg(slot + 1), f->as_VMReg()->next());
+  if (describe_fprs) {
+    for (int i = 0; i < fr_count; i++) {
+      FloatRegister f = as_FloatRegister(fr_first + i);
+      int slot = (fr_dbl_off + i * wordSize) / VMRegImpl::stack_slot_size;
+      map->set_callee_saved(VMRegImpl::stack2reg(slot), f->as_VMReg());
+      map->set_callee_saved(VMRegImpl::stack2reg(slot + 1), f->as_VMReg()->next());
+    }
   }
   return map;
 }
 
-void RegisterSaver::restore_live_registers(MacroAssembler* masm) {
+void RegisterSaver::restore_live_registers(MacroAssembler* masm, bool with_leave, Register keep) {
   for (int i = 0; i < fr_count; i++) {
     __ adds(t1, fr_spill_off + i * 16, sp);
     __ ldf_fill(as_FloatRegister(fr_first + i), t1);
   }
   for (int i = 0; i < gr_count; i++) {
+    if (gr_at(i) == keep->raw_encoding()) continue;
     __ adds(t1, gr_off + i * wordSize, sp);
     __ Assembler::ld8(as_Register(gr_at(i)), t1);
   }
@@ -200,9 +151,12 @@ void RegisterSaver::restore_live_registers(MacroAssembler* masm) {
   __ Assembler::ld8(t0, t1);
   __ mov_to_pr(t0, -1);
   __ adds(sp, (int)save_bytes, sp);
-  __ leave();
+  if (with_leave) {
+    __ leave();
+  }
 }
 
+// Emit a named trap: generation succeeds, execution stops the VM.
 static void trap(MacroAssembler* masm, const char* what) {
   __ stop(what);
 }

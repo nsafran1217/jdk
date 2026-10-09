@@ -113,6 +113,16 @@ using MacroAssembler::null_check;
 
   void load_parameter(int offset_in_words, Register reg);
 
+  // Arguments of the C1 runtime stubs that riscv passes on the stack
+  // (store_parameter) or in t0/t1: here they travel in t2/t3. C1 never
+  // allocates r9-r11, so a CodeStub can load them without disturbing a live
+  // value, and the stubs' register saver (RegisterSaver, which uses only t0/t1,
+  // f6 and p6/p7) leaves them intact. See c1_Runtime1_ia64.cpp for each stub's
+  // use; klass, length and varargs use FrameMap::stub_*_reg instead, and stubs
+  // reached through call_runtime take C arguments in out0.. .
+  static constexpr Register stub_arg0 = t2;   // r9
+  static constexpr Register stub_arg1 = t3;   // r10
+
   void inline_cache_check(Register receiver, Register iCache, Label &L);
 
 #endif // CPU_IA64_C1_MACROASSEMBLER_IA64_HPP
