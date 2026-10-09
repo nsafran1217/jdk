@@ -48,6 +48,16 @@
 // The handler is called from generated code (the native entry), never from
 // C++, so unlike PPC64 ELFv1 it needs no function descriptor in front of it.
 
+// The slow signature handler's save area, relative to its `to` pointer (the
+// outgoing stack arguments): the generated stub's frame lies directly below
+// `to` - 16 (interpreterRT_ia64.cpp, generate_slow_signature_handler).
+enum {
+  slow_handler_frame_bytes = 176,   // 16 scratch, b0, mask, 8 GR, 8 FP words, pad
+  slow_handler_gr_area_off = -(slow_handler_frame_bytes + 16) + 32,
+  slow_handler_fp_mask_off = -(slow_handler_frame_bytes + 16) + 24,
+  slow_handler_fp_area_off = -(slow_handler_frame_bytes + 16) + 96
+};
+
 class SignatureHandlerGenerator: public NativeSignatureIterator {
  private:
   MacroAssembler* _masm;

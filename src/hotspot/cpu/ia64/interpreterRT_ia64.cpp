@@ -155,3 +155,122 @@ void InterpreterRuntime::SignatureHandlerGenerator::generate(uint64_t fingerprin
 // The handlers are generated code called from generated code; nothing to
 // patch in front of them (PPC64 ELFv1 adds a descriptor here).
 void SignatureHandlerLibrary::pd_set_handler(address handler) {}
+
+
+// Implementation of the slow signature handler, for signatures too long to
+// fingerprint (TemplateInterpreterGenerator::generate_slow_signature_handler).
+// The generated part calls this with `to` = the outgoing stack arguments
+// (sp + 16 as the native entry left it) and a save area just below its own
+// frame, which it then loads into out0-out7 and f8-f15. The positional rule
+// is the one SignatureHandlerGenerator follows (interpreterRT_ia64.hpp).
+//
+// Save area, relative to `to` (slow_handler_layout, shared with the
+// generated part):
+//   to + gr_area_off   8 words: positions 0-7 (0 = JNIEnv*, 1 = mirror if static)
+//   to + fp_area_off   8 words: FP arguments in memory format, by FP count
+//   to + fp_mask_off   bit i set: FP argument i is a double (else a float)
+
+class SlowSignatureHandler : public NativeSignatureIterator {
+ private:
+  address   _from;
+  intptr_t* _to;
+  intptr_t* _gr_args;
+  intptr_t* _fp_args;
+  uint64_t* _fp_mask;
+  unsigned int _next_slot;
+  unsigned int _num_fp;
+
+  intptr_t* single_slot_addr() {
+    intptr_t* from_addr = (intptr_t*)(_from + Interpreter::local_offset_in_bytes(0));
+    _from -= Interpreter::stackElementSize;
+    return from_addr;
+  }
+
+  intptr_t* double_slot_addr() {
+    intptr_t* from_addr = (intptr_t*)(_from + Interpreter::local_offset_in_bytes(1));
+    _from -= 2 * Interpreter::stackElementSize;
+    return from_addr;
+  }
+
+  // An integer-class value in the next positional slot.
+  void pass_slot(intptr_t value) {
+    if (_next_slot < 8) {
+      _gr_args[_next_slot] = value;
+    } else {
+      *_to++ = value;
+    }
+    _next_slot++;
+  }
+
+  virtual void pass_int() {
+    jint value = *(jint*)single_slot_addr();
+    pass_slot((intptr_t)value);        // sign-extended, as Java keeps ints
+  }
+
+  virtual void pass_long() {
+    pass_slot(*double_slot_addr());
+  }
+
+  virtual void pass_object() {
+    intptr_t* addr = single_slot_addr();
+    pass_slot(*addr == 0 ? (intptr_t)nullptr : (intptr_t)addr);
+  }
+
+  virtual void pass_float() {
+    jint bits = *(jint*)single_slot_addr();
+    if (_next_slot < 8) {
+      assert(_num_fp < 8, "FP argument registers exhausted before slots");
+      _fp_args[_num_fp++] = (intptr_t)(juint)bits;
+    } else {
+      // On the stack in memory format: the single in the slot's low 4 bytes.
+      intptr_t slot = 0;
+      *(jint*)&slot = bits;
+      *_to++ = slot;
+    }
+    _next_slot++;
+  }
+
+  virtual void pass_double() {
+    intptr_t bits = *double_slot_addr();
+    if (_next_slot < 8) {
+      assert(_num_fp < 8, "FP argument registers exhausted before slots");
+      *_fp_mask |= (uint64_t)1 << _num_fp;
+      _fp_args[_num_fp++] = bits;
+    } else {
+      *_to++ = bits;
+    }
+    _next_slot++;
+  }
+
+ public:
+  SlowSignatureHandler(const methodHandle& method, address from, intptr_t* to)
+    : NativeSignatureIterator(method) {
+    _from = from;
+    _to = to;
+    _gr_args = (intptr_t*)((address)to + InterpreterRuntime::slow_handler_gr_area_off);
+    _fp_args = (intptr_t*)((address)to + InterpreterRuntime::slow_handler_fp_area_off);
+    _fp_mask = (uint64_t*)((address)to + InterpreterRuntime::slow_handler_fp_mask_off);
+    *_fp_mask = 0;
+    // slot 0 is the JNIEnv*, slot 1 the class mirror of a static method
+    _next_slot = method->is_static() ? 2 : 1;
+    _num_fp = 0;
+  }
+};
+
+
+JRT_ENTRY(address,
+          InterpreterRuntime::slow_signature_handler(JavaThread* current,
+                                                     Method* method,
+                                                     intptr_t* from,
+                                                     intptr_t* to))
+  methodHandle m(current, (Method*)method);
+  assert(m->is_native(), "sanity check");
+
+  // handle arguments
+  SlowSignatureHandler ssh(m, (address)from, to);
+  ssh.iterate(UCONST64(-1));
+
+  // return result handler
+  return Interpreter::result_handler(m->result_type());
+JRT_END
+

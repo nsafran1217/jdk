@@ -108,12 +108,50 @@ static const int psabi_scratch_words = 2;
 
 //-----------------------------------------------------------------------------
 
-// Large signatures are handed to InterpreterRuntime::slow_signature_handler
-// on other ports. Milestone 1 generates handlers for every signature
-// (SignatureHandlerGenerator); this path traps if it is ever taken.
+// Large signatures (too long to fingerprint) are handed to
+// InterpreterRuntime::slow_signature_handler (interpreterRT_ia64.cpp), which
+// writes the stack arguments in place and the register arguments into a save
+// area in this stub's frame; the stub then loads out0-out7 and f8-f15 from
+// it. Called like a generated handler: br.call from the native entry, with
+// sp = the outgoing-argument area (stack arguments from sp + 16), Rlocals =
+// the arguments, Rmethod; returns the result handler in r8.
+//
+// Frame (slow_handler_frame_bytes), from the new sp:
+//   +0   psABI scratch      +16  b0      +24  FP type mask
+//   +32  out0-out7 values   +96  FP argument values (memory format)
 address TemplateInterpreterGenerator::generate_slow_signature_handler() {
   address entry = __ pc();
-  __ unimplemented("IA-64: slow signature handler");
+  const int frame = InterpreterRuntime::slow_handler_frame_bytes;
+  STATIC_ASSERT(InterpreterRuntime::slow_handler_frame_bytes % 16 == 0);
+
+  __ mov_from_br(t3, breturn);
+  __ adds(t4, 16, sp);                 // to: the outgoing stack arguments
+  __ adds(sp, -frame, sp);
+  __ st8(Address(sp, 16), t3);
+
+  __ call_VM(noreg,
+             CAST_FROM_FN_PTR(address, InterpreterRuntime::slow_signature_handler),
+             Rmethod, Rlocals, t4);
+
+  // r8: result handler. Load the argument registers, FP first.
+  __ ld8(t3, Address(sp, 24));          // FP type mask
+  for (int i = 0; i < 8; i++) {
+    FloatRegister f = as_FloatRegister(8 + i);
+    __ adds(t2, 96 + i * wordSize, sp);
+    __ tbit_nz(ptmp0, ptmp1, t3, i);
+    __ Assembler::ldfd(f, t2, ptmp0);
+    __ Assembler::ldfs(f, t2, ptmp1);
+  }
+  for (int i = 0; i < 8; i++) {
+    __ adds(t2, 32 + i * wordSize, sp);
+    __ Assembler::ld8(as_Register(c_rarg0->encoding() + i), t2);
+  }
+
+  // Restore b0 and pop the frame.
+  __ ld8(t3, Address(sp, 16));
+  __ mov_to_br(breturn, t3);
+  __ adds(sp, frame, sp);
+  __ ret();
   return entry;
 }
 
