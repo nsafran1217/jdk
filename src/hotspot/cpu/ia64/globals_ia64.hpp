@@ -124,6 +124,10 @@ define_pd_global(intx, InlineSmallCode, 1000);
                                                                                  \
   product(bool, UseStopElision, true, DIAGNOSTIC,                                \
           "Let independent consecutive instructions share an instruction "      \
-          "group by omitting the stop between them (BUNDLING.md, Stage 1)")
+          "group by omitting the stop between them (BUNDLING.md, Stage 1)")      \
+                                                                                 \
+  product(bool, UseBundlePacking, false, DIAGNOSTIC,                             \
+          "Pack up to three instructions per bundle in compiled code "          \
+          "(BUNDLING.md, Stage 2)")
 
 #endif // CPU_IA64_GLOBALS_IA64_HPP

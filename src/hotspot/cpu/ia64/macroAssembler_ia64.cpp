@@ -179,6 +179,7 @@ void MacroAssembler::call_c(Register function_descriptor) {
 // is position-independent: moving the code moves the cell with it, and the
 // destination is absolute. NativeCall recognises exactly this shape.
 void MacroAssembler::far_call(address entry, PredicateRegister qp) {
+  NoPackScope no_pack(this);   // a fixed shape (BUNDLING.md Stage 2)
   assert(entry != nullptr, "far_call to null");
   assert(qp == pTrue, "IA-64: the cell-form call cannot be predicated");
   Label over_cell;
@@ -206,6 +207,7 @@ int MacroAssembler::ic_check_size() {
 }
 
 int MacroAssembler::ic_check(int end_alignment) {
+  NoPackScope no_pack(this);   // a fixed shape (BUNDLING.md Stage 2)
   Register receiver = j_rarg0;
   Register data = t1;      // CompiledICData*
   Register tmp1 = t2;      // scratch: never live at a method entry
@@ -242,6 +244,7 @@ int MacroAssembler::ic_check(int end_alignment) {
 // The to-interpreter stub of a static/opt-virtual call (compiledIC_ia64.cpp):
 // movl Rmethod = 0; far_jump(-1). Filled in by set_to_interpreted.
 void MacroAssembler::emit_static_call_stub() {
+  NoPackScope no_pack(this);   // a fixed shape (BUNDLING.md Stage 2)
   movl(Rmethod, (uint64_t)0);
   far_jump((address)-1);
 }
@@ -251,6 +254,7 @@ int MacroAssembler::static_call_stub_size() {
 }
 
 void MacroAssembler::far_jump(address entry, PredicateRegister qp) {
+  NoPackScope no_pack(this);   // a fixed shape (BUNDLING.md Stage 2)
   assert(entry != nullptr, "far_jump to null");
   movl(t0, entry);
   mov_to_br(btmp, t0);
@@ -558,6 +562,7 @@ void MacroAssembler::null_check(Register reg, int offset) {
 // ---- debugging ---------------------------------------------------------------
 
 void MacroAssembler::stop(const char* msg) {
+  NoPackScope no_pack(this);   // a fixed shape (BUNDLING.md Stage 2)
   // break.b, then the message pointer as a data bundle the trap never falls
   // into. The SIGILL handler recognises the immediate and reads the message
   // from the following bundle.

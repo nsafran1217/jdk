@@ -150,6 +150,7 @@ void BarrierSetAssembler::nmethod_entry_barrier(MacroAssembler* masm) {
   if (bs_nm == nullptr) {
     return;
   }
+  Assembler::NoPackScope no_pack(masm);   // fixed length: BarrierSetNMethod finds the guard
   int start = __ offset();
   Label over, skip;
   __ br(over);

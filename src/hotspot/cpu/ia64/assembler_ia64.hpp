@@ -285,12 +285,12 @@ class Assembler : public AbstractAssembler {
 
  private:
   void emit_raw_bundle(ia64::Bundle b) {
-    assert(is_aligned(offset(), BytesPerBundle),
+    assert(is_aligned(AbstractAssembler::offset(), BytesPerBundle),
            "code position must stay bundle-aligned");
     // Little-endian target, so emitting lo then hi lays the 128-bit bundle out
     // exactly as the hardware reads it.
-    emit_int64(b.lo);
-    emit_int64(b.hi);
+    AbstractAssembler::emit_int64(b.lo);
+    AbstractAssembler::emit_int64(b.hi);
   }
 
  public:
@@ -368,10 +368,12 @@ class Assembler : public AbstractAssembler {
   }
 
  public:
-  // Emit a bundle. |d| == nullptr makes it a barrier.
+  // Emit a whole single-instruction bundle. |d| == nullptr makes it a
+  // barrier. Closes any open packed bundle first.
   void emit_bundle(ia64::Bundle b, const Deps* d = nullptr) {
+    _ob_open = false;
     if (d != nullptr && UseStopElision &&
-        _last_sect == code_section() && _last_off == offset() - BytesPerBundle &&
+        _last_sect == code_section() && _last_off == raw_offset() - BytesPerBundle &&
         !conflicts(*d)) {
       // Join the open group: clear the stop at the end of the previous bundle.
       address prev = code_section()->start() + _last_off;
@@ -386,7 +388,7 @@ class Assembler : public AbstractAssembler {
     emit_raw_bundle(b);
     if (d != nullptr && !d->is_branch && !d->keep_stop) {
       _last_sect = code_section();
-      _last_off  = offset() - BytesPerBundle;
+      _last_off  = raw_offset() - BytesPerBundle;
     } else {
       _last_sect = nullptr;               // its stop stays: the next instruction
       _last_off  = -1;                    // starts a new group
@@ -394,17 +396,195 @@ class Assembler : public AbstractAssembler {
     }
   }
 
-  // One instruction per bundle, padded with unit-appropriate nops and a
-  // trailing stop bit. See the [IA64DOC] comment in assembler_ia64_core.hpp.
-  void emit_m(ia64::Insn i, const Deps& d) { emit_bundle(ia64::BundleM(i), &d); }
-  void emit_i(ia64::Insn i, const Deps& d) { emit_bundle(ia64::BundleI(i), &d); }
-  void emit_f(ia64::Insn i, const Deps& d) { emit_bundle(ia64::BundleF(i), &d); }
+  // ---- bundle packing (BUNDLING.md, Stage 2) -------------------------------
+  //
+  // Inside a PackScope (UseBundlePacking), M, I, A and F instructions with a
+  // Deps are packed up to three to a bundle. The open bundle's address is
+  // fixed when it opens -- its 16 bytes are emitted at once and rewritten as
+  // instructions join -- so nothing already handed out ever moves. Slots keep
+  // program order; a RAW/WAW dependency on the open group needs a stop, which
+  // goes inside the bundle (MI_I, M_MI) or ends it.
+  //
+  // Correct by construction rather than by audit: every way of observing the
+  // code position -- pc(), offset(), bind(), relocate(), data emission,
+  // switching sections -- closes the open bundle first (the hiding overloads
+  // below), so whatever the caller records names the start of a fresh bundle,
+  // and the next instruction opens it. Branches, movl and barriers always
+  // close the open bundle and take a bundle of their own, so call sequences,
+  // patch sites and every shape a NativeInstruction recognises are unchanged.
+  enum Unit : uint8_t { U_M, U_I, U_A, U_F };
+
+  void emit_m(ia64::Insn i, const Deps& d) { emit_unit(U_M, i, d); }
+  void emit_i(ia64::Insn i, const Deps& d) { emit_unit(U_I, i, d); }
+  void emit_a(ia64::Insn i, const Deps& d) { emit_unit(U_A, i, d); }
+  void emit_f(ia64::Insn i, const Deps& d) { emit_unit(U_F, i, d); }
   void emit_b(ia64::Insn i, const Deps& d) { emit_bundle(ia64::BundleB(i), &d); }
   // Barriers: forms with implicit resources or not yet described.
   void emit_m(ia64::Insn i) { emit_bundle(ia64::BundleM(i)); }
   void emit_i(ia64::Insn i) { emit_bundle(ia64::BundleI(i)); }
   void emit_f(ia64::Insn i) { emit_bundle(ia64::BundleF(i)); }
   void emit_b(ia64::Insn i) { emit_bundle(ia64::BundleB(i)); }
+
+  // Packing on (depth > 0) or off within a scope.
+  class PackScope {
+    Assembler* _a; int _saved;
+   public:
+    PackScope(Assembler* a, bool enable = true) : _a(a), _saved(a->_pack_depth) {
+      a->close_bundle();
+      a->_pack_depth = (enable && UseBundlePacking) ? _saved + 1 : 0;
+    }
+    ~PackScope() { _a->close_bundle(); _a->_pack_depth = _saved; }
+  };
+  // A fixed-shape sequence (call cells, patch sites, recognised stubs): no
+  // packing inside, whatever the caller allows.
+  class NoPackScope : public PackScope {
+   public:
+    NoPackScope(Assembler* a) : PackScope(a, false) {}
+  };
+
+  void close_bundle() { _ob_open = false; }
+
+  // Packing for everything this assembler emits outside explicit scopes
+  // (C1_MacroAssembler turns it on for compiled code).
+  void set_pack_default(bool on) {
+    close_bundle();
+    _pack_depth = (on && UseBundlePacking) ? 1 : 0;
+  }
+
+  // Position observers: close the open bundle first (see above).
+  address pc()  { close_bundle(); return AbstractAssembler::pc(); }
+  int offset()  { close_bundle(); return AbstractAssembler::offset(); }
+  void bind(Label& L) { close_bundle(); AbstractAssembler::bind(L); }
+  void relocate(RelocationHolder const& rspec, int format = 0) {
+    close_bundle(); AbstractAssembler::relocate(rspec, format);
+  }
+  void relocate(relocInfo::relocType rtype, int format = 0) {
+    close_bundle(); AbstractAssembler::relocate(rtype, format);
+  }
+  void emit_int8(int8_t x)   { close_bundle(); AbstractAssembler::emit_int8(x); }
+  void emit_int16(int16_t x) { close_bundle(); AbstractAssembler::emit_int16(x); }
+  void emit_int32(int32_t x) { close_bundle(); AbstractAssembler::emit_int32(x); }
+  void emit_int64(int64_t x) { close_bundle(); AbstractAssembler::emit_int64(x); }
+  address start_a_stub(int required_space) { close_bundle(); return AbstractAssembler::start_a_stub(required_space); }
+  void end_a_stub() { close_bundle(); AbstractAssembler::end_a_stub(); }
+
+ private:
+  int raw_offset() const { return AbstractAssembler::offset(); }
+
+  int          _pack_depth = 0;
+  bool         _ob_open    = false;      // the last bundle can take more
+  CodeSection* _ob_sect    = nullptr;
+  int          _ob_off     = -1;
+  int          _ob_n       = 0;
+  ia64::Insn   _ob_insn[3];
+  Unit         _ob_unit[3];
+  bool         _ob_stop[3];              // a stop precedes instruction k
+
+  static bool fits(Unit u, char slot) {
+    switch (u) {
+      case U_M: return slot == 'M';
+      case U_I: return slot == 'I';
+      case U_A: return slot == 'M' || slot == 'I';
+      case U_F: return slot == 'F';
+    }
+    return false;
+  }
+
+  // Find a template and increasing slots for n instructions (program order),
+  // honouring required stops with the template's internal stop. Prefers the
+  // placement that leaves the most room, then the fewest stops.
+  static bool place(int n, const Unit* u, const bool* stop, ia64::Template* tmpl, int* pos) {
+    struct T { ia64::Template t; const char* slots; int gb; };
+    static const T ts[] = {
+      { ia64::tMII,  "MII", 0 }, { ia64::tMMI, "MMI", 0 }, { ia64::tMFI, "MFI", 0 },
+      { ia64::tMMF,  "MMF", 0 }, { ia64::tMI_I, "MII", 2 }, { ia64::tM_MI, "MMI", 1 }
+    };
+    // Increasing slot tuples, for n = 1, 2, 3.
+    static const int tuples1[3][3] = { {0}, {1}, {2} };
+    static const int tuples2[3][3] = { {0, 1}, {0, 2}, {1, 2} };
+    static const int tuples3[1][3] = { {0, 1, 2} };
+    const int (*tuples)[3] = (n == 1) ? tuples1 : (n == 2) ? tuples2 : tuples3;
+    const int ntuples = (n == 3) ? 1 : 3;
+    int best_last = 99, best_stops = 99;
+    for (const T& t : ts) {
+      for (int i = 0; i < ntuples; i++) {
+        const int* p = tuples[i];
+        bool ok = true;
+        for (int k = 0; k < n && ok; k++) ok = fits(u[k], t.slots[p[k]]);
+        for (int k = 1; k < n && ok; k++) {
+          if (stop[k]) ok = (t.gb != 0 && p[k - 1] < t.gb && t.gb <= p[k]);
+        }
+        int stops = (t.gb != 0) ? 1 : 0;
+        if (ok && (p[n - 1] < best_last || (p[n - 1] == best_last && stops < best_stops))) {
+          best_last = p[n - 1]; best_stops = stops;
+          *tmpl = t.t;
+          for (int k = 0; k < n; k++) pos[k] = p[k];
+        }
+      }
+    }
+    return best_last != 99;
+  }
+
+  // Encode the open bundle in place; it always ends in a stop until a later
+  // instruction continues its group into the next bundle.
+  void write_open_bundle(ia64::Template tmpl, const int* pos) {
+    ia64::Insn slot[3] = { ia64::NopM(), ia64::NopI(), ia64::NopI() };
+    for (int k = 0; k < _ob_n; k++) slot[pos[k]] = _ob_insn[k];
+    ia64::Bundle b = ia64::MakeBundle((ia64::Template)(tmpl | 1), slot[0], slot[1], slot[2]);
+    address p = _ob_sect->start() + _ob_off;
+    *(uint64_t*)p = b.lo;
+    *(uint64_t*)(p + 8) = b.hi;
+  }
+
+  void emit_unit(Unit u, ia64::Insn insn, const Deps& d) {
+    if (_pack_depth == 0) {
+      ia64::Bundle b = (u == U_I) ? ia64::BundleI(insn) :
+                       (u == U_F) ? ia64::BundleF(insn) : ia64::BundleM(insn);
+      emit_bundle(b, &d);
+      return;
+    }
+    bool conflict = conflicts(d);
+    if (_ob_open && _ob_n < 3 && _ob_sect == code_section() &&
+        _ob_off == raw_offset() - BytesPerBundle) {
+      Unit us[3]; bool st[3]; int pos[3]; ia64::Template tmpl;
+      for (int k = 0; k < _ob_n; k++) { us[k] = _ob_unit[k]; st[k] = _ob_stop[k]; }
+      us[_ob_n] = u; st[_ob_n] = conflict;
+      if (place(_ob_n + 1, us, st, &tmpl, pos)) {
+        _ob_insn[_ob_n] = insn; _ob_unit[_ob_n] = u; _ob_stop[_ob_n] = conflict;
+        _ob_n++;
+        write_open_bundle(tmpl, pos);
+        if (conflict) clear_pending();
+        add_pending(d);
+        return;
+      }
+    }
+    // A new bundle. The group continues into it, clearing the previous
+    // bundle's end stop, only if that bundle allows it and nothing conflicts.
+    if (!conflict && UseStopElision &&
+        _last_sect == code_section() && _last_off == raw_offset() - BytesPerBundle) {
+      address prev = code_section()->start() + _last_off;
+      assert((*prev & 1) == 1, "previous bundle must still end in a stop");
+      *prev &= ~1;
+    } else {
+      clear_pending();
+    }
+    add_pending(d);
+    _ob_open = false;
+    emit_raw_bundle(ia64::BundleNop());
+    _ob_open = true;
+    _ob_sect = code_section();
+    _ob_off  = raw_offset() - BytesPerBundle;
+    _ob_n = 1;
+    _ob_insn[0] = insn; _ob_unit[0] = u; _ob_stop[0] = false;
+    int pos[1]; ia64::Template tmpl;
+    bool ok = place(1, _ob_unit, _ob_stop, &tmpl, pos);
+    assert(ok, "a single instruction always fits");
+    write_open_bundle(tmpl, pos);
+    _last_sect = _ob_sect;
+    _last_off  = _ob_off;
+  }
+
+ public:
 
   void nop() { emit_bundle(ia64::BundleNop()); }
 
@@ -464,34 +644,34 @@ class Assembler : public AbstractAssembler {
   void ldf_fill(FloatRegister f1, Register r3, QP)  { emit_m(ia64::LdfFill(f1->encoding(), r3->encoding(), Q)); }
   void stf_spill(Register r3, FloatRegister f2, QP) { emit_m(ia64::StfSpill(r3->encoding(), f2->encoding(), Q)); }
 
-  // ---- ALU (A unit, issued on M here since we pad to MII) ----------------
+  // ---- ALU (A unit: an M or an I slot) -------------------------------------
 
-  void add(Register r1, Register r2, Register r3, QP)   { emit_m(ia64::Add(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
-  void sub(Register r1, Register r2, Register r3, QP)   { emit_m(ia64::Sub(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
-  void and_(Register r1, Register r2, Register r3, QP)  { emit_m(ia64::And(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
-  void andcm(Register r1, Register r2, Register r3, QP) { emit_m(ia64::Andcm(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
-  void or_(Register r1, Register r2, Register r3, QP)   { emit_m(ia64::Or(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
-  void xor_(Register r1, Register r2, Register r3, QP)  { emit_m(ia64::Xor(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
+  void add(Register r1, Register r2, Register r3, QP)   { emit_a(ia64::Add(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
+  void sub(Register r1, Register r2, Register r3, QP)   { emit_a(ia64::Sub(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
+  void and_(Register r1, Register r2, Register r3, QP)  { emit_a(ia64::And(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
+  void andcm(Register r1, Register r2, Register r3, QP) { emit_a(ia64::Andcm(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
+  void or_(Register r1, Register r2, Register r3, QP)   { emit_a(ia64::Or(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
+  void xor_(Register r1, Register r2, Register r3, QP)  { emit_a(ia64::Xor(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
 
   // The 8-bit immediate forms. Note the immediate is the FIRST source:
   // sub_imm(r1, imm8, r3) computes imm8 - r3 (so negation is sub_imm(r1, 0, r3)).
-  void and_imm(Register r1, int64_t imm8, Register r3, QP) { assert(ia64::is_simm8(imm8), "imm8"); emit_m(ia64::AndImm(r1->encoding(), imm8, r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
-  void or_imm(Register r1, int64_t imm8, Register r3, QP)  { assert(ia64::is_simm8(imm8), "imm8"); emit_m(ia64::OrImm(r1->encoding(), imm8, r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
-  void xor_imm(Register r1, int64_t imm8, Register r3, QP) { assert(ia64::is_simm8(imm8), "imm8"); emit_m(ia64::XorImm(r1->encoding(), imm8, r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
-  void sub_imm(Register r1, int64_t imm8, Register r3, QP) { assert(ia64::is_simm8(imm8), "imm8"); emit_m(ia64::SubImm(r1->encoding(), imm8, r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  void and_imm(Register r1, int64_t imm8, Register r3, QP) { assert(ia64::is_simm8(imm8), "imm8"); emit_a(ia64::AndImm(r1->encoding(), imm8, r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  void or_imm(Register r1, int64_t imm8, Register r3, QP)  { assert(ia64::is_simm8(imm8), "imm8"); emit_a(ia64::OrImm(r1->encoding(), imm8, r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  void xor_imm(Register r1, int64_t imm8, Register r3, QP) { assert(ia64::is_simm8(imm8), "imm8"); emit_a(ia64::XorImm(r1->encoding(), imm8, r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  void sub_imm(Register r1, int64_t imm8, Register r3, QP) { assert(ia64::is_simm8(imm8), "imm8"); emit_a(ia64::SubImm(r1->encoding(), imm8, r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
 
   // r1 = (r2 << count) + r3, count 1..4: base + index * scale in one step.
   void shladd(Register r1, Register r2, int count, Register r3, QP) {
-    emit_m(ia64::Shladd(r1->encoding(), r2->encoding(), count, r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp));
+    emit_a(ia64::Shladd(r1->encoding(), r2->encoding(), count, r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp));
   }
 
   // adds is also the register move (imm == 0) and the only way to add a small
   // constant; anything wider than 14 bits signed needs movl + add.
   void adds(Register r1, int64_t imm14, Register r3, QP) {
     assert(ia64::is_simm14(imm14), "immediate too wide for adds -- use movl + add");
-    emit_m(ia64::Adds(r1->encoding(), imm14, r3->encoding(), Q), D().w(r1).r(r3).r(qp));
+    emit_a(ia64::Adds(r1->encoding(), imm14, r3->encoding(), Q), D().w(r1).r(r3).r(qp));
   }
-  void mov(Register r1, Register r3, QP) { emit_m(ia64::MovReg(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  void mov(Register r1, Register r3, QP) { emit_a(ia64::MovReg(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
 
   // ---- compare (A unit) --------------------------------------------------
   //
@@ -500,20 +680,20 @@ class Assembler : public AbstractAssembler {
   // int comparisons want. The immediate forms take the 8-bit immediate as the
   // FIRST operand: cmp_lt_imm(p1, p2, 5, r) tests 5 < r.
 
-  void cmp_eq(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::CmpEq(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
-  void cmp_ne(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::CmpNe(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
-  void cmp_lt(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::CmpLt(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
-  void cmp_ltu(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP) { emit_m(ia64::CmpLtu(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
+  void cmp_eq(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::CmpEq(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
+  void cmp_ne(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::CmpNe(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
+  void cmp_lt(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::CmpLt(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
+  void cmp_ltu(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP) { emit_a(ia64::CmpLtu(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
 
-  void cmp4_eq(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::Cmp4Eq(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
-  void cmp4_ne(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::Cmp4Ne(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
-  void cmp4_lt(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::Cmp4Lt(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
-  void cmp4_ltu(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP) { emit_m(ia64::Cmp4Ltu(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
+  void cmp4_eq(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::Cmp4Eq(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
+  void cmp4_ne(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::Cmp4Ne(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
+  void cmp4_lt(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::Cmp4Lt(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
+  void cmp4_ltu(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP) { emit_a(ia64::Cmp4Ltu(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
 
 #define CMP_IMM(name, Enc) \
   void name(PredicateRegister p1, PredicateRegister p2, int64_t imm8, Register r3, QP) { \
     assert(ia64::is_simm8(imm8), "imm8"); \
-    emit_m(ia64::Enc(p1.encoding(), p2.encoding(), imm8, r3->encoding(), Q), D().w(p1).w(p2).r(r3).r(qp)); \
+    emit_a(ia64::Enc(p1.encoding(), p2.encoding(), imm8, r3->encoding(), Q), D().w(p1).w(p2).r(r3).r(qp)); \
   }
   CMP_IMM(cmp_eq_imm,   CmpEqImm)
   CMP_IMM(cmp_ne_imm,   CmpNeImm)

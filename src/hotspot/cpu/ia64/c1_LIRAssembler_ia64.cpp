@@ -1817,7 +1817,13 @@ void LIR_Assembler::get_thread(LIR_Opr result_reg) {
   __ mov(result_reg->as_register(), Rthread);
 }
 
-void LIR_Assembler::peephole(LIR_List *lir) {}
+// Not a peephole optimizer: the per-method packing decision, made before
+// each block is emitted. A method with unsafe accesses is not packed -- the
+// SIGBUS handler resumes an unsafe access at the next bundle
+// (handle_unsafe_access), which would skip instructions packed after it.
+void LIR_Assembler::peephole(LIR_List *lir) {
+  _masm->set_pack_default(!compilation()->has_unsafe_access());
+}
 
 int LIR_Assembler::array_element_size(BasicType type) const {
   int elem_size = type2aelembytes(type);

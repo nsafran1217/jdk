@@ -35,7 +35,8 @@ using MacroAssembler::null_check;
  private:
   int _rsp_offset;    // track rsp changes
   // initialization
-  void pd_init() { _rsp_offset = 0; }
+  // Compiled code is packed (UseBundlePacking, BUNDLING.md Stage 2).
+  void pd_init() { _rsp_offset = 0; set_pack_default(true); }
 
 
  public:
