@@ -442,12 +442,59 @@ void InterpreterMacroAssembler::jump_from_interpreted(Register method) {
 }
 
 // The following two routines provide a hook so that an implementation
-// can schedule the dispatch in two parts.  amd64 does not do this.
+// can schedule the dispatch in two parts.  amd64 does not do this; IA-64 does.
+//
+// A dispatch is a chain of dependent operations -- load the next bytecode,
+// index the table, load the handler, move it to a branch register, branch --
+// and IA-64 cannot predict an indirect branch whose target register was
+// written just before it. Emitted at the end of the template (as on other
+// ports) the whole chain is exposed. So dispatch_prolog, which the shared
+// generator emits *before* each non-dispatching template's body, does all of
+// it up to the move into b7, and dispatch_epilog just advances Rbcp and
+// branches through b7: the chain overlaps the template's own work, and the
+// target is in a branch register well before the branch.
+//
+// This is valid when b7 still holds what the prolog loaded, i.e. no call (a
+// call clobbers the scratch branch registers) and no other write of b7 was
+// emitted in between -- tracked by Assembler::branch_reg_epoch() -- and when
+// Rbcp at the epilog equals Rbcp at the prolog. Every template that writes
+// Rbcp either dispatches itself (no prolog), calls the VM (epoch moved), or
+// restores it (fast_xaccess). Otherwise the epilog falls back to the full
+// dispatch. Reading bcp + step early is safe: only non-dispatching templates
+// get a prolog, so a next bytecode exists (a method cannot fall off its end),
+// and a concurrent rewrite of it (quickening, a JVMTI breakpoint) seen one
+// bytecode early dispatches to a template that is still correct for it -- the
+// same race the late load already has.
 void InterpreterMacroAssembler::dispatch_prolog(TosState state, int step) {
+  _early_dispatch_epoch = -1;
+  if (step <= 0) {
+    return;
+  }
+  adds(t0, step, Rbcp);
+  Assembler::ld1(t0, t0);
+  movl(t1, (address)Interpreter::dispatch_table(state));
+  shladd(t1, t0, LogBytesPerWord, t1);
+  Assembler::ld8(t1, t1);
+  mov_to_br(b7, t1);
+  _early_dispatch_epoch = branch_reg_epoch();
+  _early_dispatch_state = state;
+  _early_dispatch_step  = step;
 }
 
 void InterpreterMacroAssembler::dispatch_epilog(TosState state, int step) {
-  dispatch_next(state, step);
+  if (_early_dispatch_epoch >= 0 &&
+      _early_dispatch_epoch == branch_reg_epoch() &&
+      _early_dispatch_state == state &&
+      _early_dispatch_step == step) {
+    if (state == atos) {
+      verify_oop(Rtos);
+    }
+    add_imm(Rbcp, Rbcp, step);
+    br_cond(b7);
+  } else {
+    dispatch_next(state, step);
+  }
+  _early_dispatch_epoch = -1;
 }
 
 // IA-64: there is no dispatch register. The table address is a constant --

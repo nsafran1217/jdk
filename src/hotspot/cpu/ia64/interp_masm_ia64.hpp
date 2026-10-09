@@ -57,6 +57,14 @@
 typedef ByteSize (*OffsetFunction)(uint);
 
 class InterpreterMacroAssembler: public MacroAssembler {
+ private:
+  // Early dispatch: what dispatch_prolog loaded into b7, and the Assembler's
+  // branch_reg_epoch() just after. dispatch_epilog branches through b7 only if
+  // the epoch is unchanged (no call, no other b7 write) and state/step match.
+  int      _early_dispatch_epoch = -1;
+  TosState _early_dispatch_state = ilgl;
+  int      _early_dispatch_step  = 0;
+
  protected:
   // Interpreter specific version of call_VM_base
   using MacroAssembler::call_VM_leaf_base;

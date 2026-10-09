@@ -249,8 +249,18 @@ class Address {
 // ---------------------------------------------------------------------------
 
 class Assembler : public AbstractAssembler {
+ private:
+  // Counts every br.call emitted, and every write of b7 -- the events after
+  // which a branch-register value computed earlier can no longer be trusted
+  // (a call clobbers the scratch branch registers b6/b7). The interpreter's
+  // early dispatch (dispatch_prolog/epilog) loads the next handler into b7
+  // and uses it only if this count has not moved since.
+  int _branch_reg_epoch = 0;
+
  public:
   Assembler(CodeBuffer* code) : AbstractAssembler(code) {}
+
+  int branch_reg_epoch() const { return _branch_reg_epoch; }
 
   // Every instruction is a whole bundle, so instruction length is constant.
   static unsigned int instr_len(unsigned char* instr) { return BytesPerBundle; }
@@ -470,7 +480,10 @@ class Assembler : public AbstractAssembler {
   void mov_from_pfs(Register r1) { mov_from_ar(r1, ia64::kArPfs); }
   void mov_to_pfs(Register r2)   { mov_to_ar(ia64::kArPfs, r2); }
 
-  void mov_to_br(BranchRegister b1, Register r2, QP)   { emit_i(ia64::MovToBr(b1.encoding(), r2->encoding(), Q)); }
+  void mov_to_br(BranchRegister b1, Register r2, QP)   {
+    if (b1 == b7) _branch_reg_epoch++;
+    emit_i(ia64::MovToBr(b1.encoding(), r2->encoding(), Q));
+  }
   void mov_from_br(Register r1, BranchRegister b2, QP) { emit_i(ia64::MovFromBr(r1->encoding(), b2.encoding(), Q)); }
 
   // The one and only alloc, in StubRoutines::call_stub(). See FRAME-DESIGN.md
@@ -482,7 +495,7 @@ class Assembler : public AbstractAssembler {
 
   void br_cond(BranchRegister b2, QP)                    { emit_b(ia64::BrCond(b2.encoding(), Q)); }
   void br_ret(BranchRegister b2 = breturn, QP)           { emit_b(ia64::BrRet(b2.encoding(), Q)); }
-  void br_call(BranchRegister b1, BranchRegister b2, QP) { emit_b(ia64::BrCall(b1.encoding(), b2.encoding(), Q)); }
+  void br_call(BranchRegister b1, BranchRegister b2, QP) { _branch_reg_epoch++; emit_b(ia64::BrCall(b1.encoding(), b2.encoding(), Q)); }
 
   // IP-relative, to a label: +/-16 MiB, measured in bundles from this one.
   // Enough for any branch within one blob; anything that may be farther (a
@@ -492,6 +505,7 @@ class Assembler : public AbstractAssembler {
     emit_b(ia64::BrCondRel(bundle_disp(dest), Q));
   }
   void br_call(BranchRegister b1, Label& L, QP) {
+    _branch_reg_epoch++;
     address dest = target(L);
     emit_b(ia64::BrCallRel(b1.encoding(), bundle_disp(dest), Q));
   }
