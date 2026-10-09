@@ -411,8 +411,11 @@ class ConcreteRegisterImpl : public AbstractRegisterImpl {
     max_fpr = max_gpr + FloatRegister::number_of_registers * FloatRegister::max_slots_per_register,
 
     // Predicate and branch registers are deliberately absent: nothing allocates
-    // them, so they need no OptoReg/VMReg numbering.
-    number_of_registers = max_fpr
+    // them, so they need no OptoReg/VMReg numbering. The one extra slot is C2's
+    // RFLAGS pseudo-register (ia64.ad), which names the p10/p11 pair: C2
+    // requires REG_COUNT <= number_of_registers (c2compiler.cpp), as x86's
+    // eflags slot does.
+    number_of_registers = max_fpr + 1
   };
 };
 

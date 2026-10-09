@@ -132,6 +132,9 @@ class NativeCall : private NativeInstruction {
     displacement_offset         = cell_offset
   };
 
+  // C2's output (output.cpp) pads before calls by this much.
+  static int byte_size() { return instruction_size; }
+
   address instruction_address() const { return addr_at(0); }
   address next_instruction_address() const { return addr_at(call_size); }
   address return_address() const { return addr_at(call_size); }

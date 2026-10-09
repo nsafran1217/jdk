@@ -119,6 +119,30 @@ void VM_Version::initialize() {
     FLAG_SET_DEFAULT(UseVectorizedMismatchIntrinsic, false);
   }
 
+#ifdef COMPILER2
+  // C2 passes ints with the upper 32 bits undefined (C2-DESIGN.md section 3),
+  // so in a tiered VM a C1 frame can receive such an argument from C2 code.
+  // Only C1's lazy mode accepts that; its eager mode assumes sign-extended
+  // arguments (C2-SCOPE.md P3).
+  if (!C1LazyIntExtension) {
+    warning("C1LazyIntExtension is required by the server VM on IA-64");
+    FLAG_SET_DEFAULT(C1LazyIntExtension, true);
+  }
+
+  // No vector unit is modelled (C2-DESIGN.md section 13).
+  if (!FLAG_IS_DEFAULT(MaxVectorSize) && MaxVectorSize != 0) {
+    warning("Vectors are not supported on IA-64");
+  }
+  FLAG_SET_DEFAULT(MaxVectorSize, 0);
+  FLAG_SET_DEFAULT(UseSuperWord, false);
+
+  // No constant table and no pc-relative loads: a tableswitch becomes a
+  // compare tree, as on JDK 6 (C2-DESIGN.md section 6).
+  if (FLAG_IS_DEFAULT(UseJumpTables)) {
+    FLAG_SET_DEFAULT(UseJumpTables, false);
+  }
+#endif // COMPILER2
+
   // UseFMA is deliberately left alone. IA-64's only FP arithmetic instruction
   // *is* the fused multiply-add -- plain add and multiply are fma with f1 (1.0)
   // and f0 (0.0) as identity operands -- so the hardware support is total. It

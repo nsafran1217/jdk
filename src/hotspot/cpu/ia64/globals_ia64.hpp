@@ -108,7 +108,10 @@ define_pd_global(bool, CompactStrings, true);
 // Clear short arrays bigger than one word in an arch-specific way
 define_pd_global(intx, InitArrayShortSize, BytesPerLong);
 
-define_pd_global(intx, InlineSmallCode, 1000);
+// C2's limit on an already-compiled callee's code size when inlining. IA-64
+// code is roughly 2-3x larger per bytecode than x86's, so the x86 value would
+// inline far less (JDK 6's IA-64 server VM shipped 3000; C2-SCOPE.md).
+define_pd_global(intx, InlineSmallCode, 2500);
 
 #define ARCH_FLAGS(develop,                                                      \
                    product,                                                      \

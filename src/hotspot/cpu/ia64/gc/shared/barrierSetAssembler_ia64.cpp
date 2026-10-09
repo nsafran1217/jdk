@@ -175,3 +175,22 @@ void BarrierSetAssembler::c2i_entry_barrier(MacroAssembler* masm) {
   // class unloading for the c2i entry to race with (riscv's check guards a
   // Method* whose holder may be unloaded concurrently).
 }
+
+#ifdef COMPILER2
+
+// As ppc: a register's second (upper-half) OptoReg slot names no register of
+// its own, so it refines to Bad.
+OptoReg::Name BarrierSetAssembler::refine_register(const Node* node, OptoReg::Name opto_reg) const {
+  if (!OptoReg::is_reg(opto_reg)) {
+    return OptoReg::Bad;
+  }
+
+  VMReg vm_reg = OptoReg::as_VMReg(opto_reg);
+  if ((vm_reg->is_Register() || vm_reg->is_FloatRegister()) && (opto_reg & 1) != 0) {
+    return OptoReg::Bad;
+  }
+
+  return opto_reg;
+}
+
+#endif // COMPILER2

@@ -30,6 +30,12 @@
 #include "gc/shared/barrierSetNMethod.hpp"
 #include "memory/allocation.hpp"
 #include "oops/access.hpp"
+#ifdef COMPILER2
+#include "code/vmreg.hpp"
+#include "opto/optoreg.hpp"
+
+class Node;
+#endif // COMPILER2
 
 // Bring-up scope (JIT-SCOPE.md phase 5): only the GCs that need no barrier
 // code of their own -- Serial, Parallel, Epsilon -- are built for the
@@ -73,6 +79,10 @@ public:
   static const int entry_barrier_guard_offset = BytesPerBundle;
   virtual void nmethod_entry_barrier(MacroAssembler* masm);
   virtual void c2i_entry_barrier(MacroAssembler* masm);
+
+#ifdef COMPILER2
+  OptoReg::Name refine_register(const Node* node, OptoReg::Name opto_reg) const;
+#endif // COMPILER2
 };
 
 #endif // CPU_IA64_GC_SHARED_BARRIERSETASSEMBLER_IA64_HPP
