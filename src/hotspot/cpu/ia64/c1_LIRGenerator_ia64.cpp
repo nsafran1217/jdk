@@ -470,9 +470,11 @@ void LIRGenerator::do_ArithmeticOp_Int(ArithmeticOp* x) {
     }
 
   } else if (x->op() == Bytecodes::_iadd || x->op() == Bytecodes::_isub) {
+    // A constant that fits adds' 14-bit immediate stays a constant (one adds);
+    // anything else is loaded.
     if (right.is_constant() &&
-        ((x->op() == Bytecodes::_iadd && !ia64::is_simm14(right.get_jint_constant())) ||
-         (x->op() == Bytecodes::_isub && !ia64::is_simm14(-right.get_jint_constant())))) {
+        ((x->op() == Bytecodes::_iadd && ia64::is_simm14(right.get_jint_constant())) ||
+         (x->op() == Bytecodes::_isub && ia64::is_simm14(-(jlong)right.get_jint_constant())))) {
       right.load_nonconstant();
     } else {
       right.load_item();
