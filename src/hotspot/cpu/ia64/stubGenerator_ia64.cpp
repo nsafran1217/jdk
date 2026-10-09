@@ -29,10 +29,12 @@
 #include "asm/macroAssembler.inline.hpp"
 #include "gc/shared/barrierSet.hpp"
 #include "gc/shared/barrierSetAssembler.hpp"
+#include "gc/shared/barrierSetNMethod.hpp"
 #include "interpreter/interpreter.hpp"
 #include "memory/universe.hpp"
 #include "nativeInst_ia64.hpp"
 #include "oops/method.hpp"
+#include "registerSaver_ia64.hpp"
 #include "runtime/frame.inline.hpp"
 #include "runtime/javaThread.hpp"
 #include "runtime/sharedRuntime.hpp"
@@ -463,9 +465,73 @@ class StubGenerator: public StubCodeGenerator {
     // VMContinuations is false on IA-64 (globals_ia64.hpp): nothing to do.
   }
 
+  // The slow path of the nmethod entry barrier (BarrierSetAssembler::
+  // nmethod_entry_barrier), called from a compiled method's prologue with
+  // its frame built and its arguments live. Asks the GC whether the method
+  // may be entered; if not, discards the method's frame and re-dispatches the
+  // call through handle_wrong_method, as though the caller had called that.
+  //
+  // Frame, in words from fp (enter()'s linkage, then the slots
+  // BarrierSetNMethod::deoptimize fills, then the register save area):
+  //   -1  return address into the nmethod     <- return_address_ptr
+  //   -2  the nmethod's fp
+  //   -3  new pc (handle_wrong_method)        return_address_ptr[-2]
+  //   -4  new return address                  return_address_ptr[-3]
+  //   -5  new fp                              return_address_ptr[-4]
+  //   -6  new sp                              return_address_ptr[-5]
+  //   -7, -8  padding
+  //   below: RegisterSaver's area
+  address generate_method_entry_barrier() {
+    __ align(CodeEntryAlignment);
+    StubGenStubId stub_id = StubGenStubId::method_entry_barrier_id;
+    StubCodeMark mark(this, stub_id);
+    address start = __ pc();
+
+    Label deoptimize;
+
+    // The last Java frame is the nmethod's own: its sp and fp, and the
+    // return address into it.
+    __ mov_from_br(t2, breturn);
+    __ st8(Address(Rthread, JavaThread::frame_anchor_offset() + JavaFrameAnchor::last_Java_pc_offset()), t2, t1);
+    __ st8(Address(Rthread, JavaThread::last_Java_fp_offset()), fp, t1);
+    __ lea(t1, Address(Rthread, JavaThread::last_Java_sp_offset()));
+    __ st8_rel(t1, sp);
+
+    __ enter();
+    __ adds(sp, -4 * wordSize, sp);
+    int frame_words;
+    RegisterSaver::save_live_registers(_masm, &frame_words, /* describe_fprs */ false, /* with_enter */ false);
+
+    __ adds(t2, frame::return_addr_offset * wordSize, fp);
+    __ call_VM_leaf(CAST_FROM_FN_PTR(address, BarrierSetNMethod::nmethod_stub_entry_barrier), t2);
+    __ mov(t2, r8);
+
+    __ reset_last_Java_frame(true);
+    RegisterSaver::restore_live_registers(_masm, /* with_leave */ false, /* keep */ t2);
+    __ bnezw(t2, deoptimize);
+
+    __ leave();
+    __ ret();
+
+    __ bind(deoptimize);
+    __ ld8(t2, Address(fp, -6 * wordSize));    // sp
+    __ ld8(t3, Address(fp, -5 * wordSize));    // fp
+    __ ld8(t4, Address(fp, -4 * wordSize));    // return address
+    __ ld8(t1, Address(fp, -3 * wordSize));    // handle_wrong_method
+    __ mov(sp, t2);
+    __ mov(fp, t3);
+    __ mov_to_br(breturn, t4);
+    __ jr(t1);
+
+    return start;
+  }
+
   void generate_final_stubs() {
-    // Nothing yet: no compiler calls the arraycopy stubs, and the C++
-    // defaults StubRoutines installs serve the runtime.
+    // No compiler calls the arraycopy stubs yet, and the C++ defaults
+    // StubRoutines installs serve the runtime.
+    if (BarrierSet::barrier_set()->barrier_set_nmethod() != nullptr) {
+      StubRoutines::_method_entry_barrier = generate_method_entry_barrier();
+    }
     StubRoutines::ia64::set_completed();
   }
 

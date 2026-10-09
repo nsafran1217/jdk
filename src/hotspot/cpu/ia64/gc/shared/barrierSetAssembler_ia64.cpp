@@ -28,6 +28,7 @@
 #include "interpreter/interp_masm.hpp"
 #include "runtime/javaThread.hpp"
 #include "runtime/jniHandles.hpp"
+#include "runtime/stubRoutines.hpp"
 
 #define __ masm->
 
@@ -124,12 +125,48 @@ void BarrierSetAssembler::tlab_allocate(MacroAssembler* masm, Register obj,
   }
 }
 
-// Milestone 1 (core variant) creates no nmethod that needs an entry barrier:
-// the only nmethods are method-handle intrinsic wrappers, and
-// BarrierSetNMethod::supports_entry_barrier() excludes those. Both barriers
-// arrive with C1.
+// nmethod entry barrier (FRAME-DESIGN.md 11.3), emitted at the end of a
+// compiled method's prologue. Fixed length -- BarrierSetNMethod finds the
+// guard from the frame-complete offset -- and the guard is a data word inline
+// in the code, branched over like far_call's cell, so arming and disarming
+// are plain aligned 4-byte stores with no instruction patching:
+//
+//     br over                       (bundle 0)
+//     <guard: int32, 12 bytes pad>  (bundle 1)
+//  over:
+//     mov t0 = ip ; adds t0 = -16, t0 ; ld4.acq t0 = [t0]
+//     adds t1 = <disarmed offset>, Rthread ; ld4 t1 = [t1]
+//     cmp4.eq p6, p7 = t0, t1
+//     (p6) br skip
+//     far_call method_entry_barrier stub   (7 bundles)
+//  skip:
+//
+// The guard is loaded with acquire, so the method's subsequent loads of oops
+// (patched by the disarming thread before its release store of the guard)
+// are ordered after it: conc_data_patch semantics. t0, t1 and p6/p7 are free
+// at a method entry; the stub preserves everything else.
 void BarrierSetAssembler::nmethod_entry_barrier(MacroAssembler* masm) {
-  Unimplemented();
+  BarrierSetNMethod* bs_nm = BarrierSet::barrier_set()->barrier_set_nmethod();
+  if (bs_nm == nullptr) {
+    return;
+  }
+  int start = __ offset();
+  Label over, skip;
+  __ br(over);
+  __ emit_int32(0);       // the guard; armed or disarmed at installation
+  __ emit_int32(0);
+  __ emit_int64(0);
+  __ bind(over);
+  __ mov_from_ip(t0);
+  __ adds(t0, -(int)BytesPerBundle, t0);
+  __ ld4_acq(t0, t0);
+  __ adds(t1, in_bytes(bs_nm->thread_disarmed_guard_value_offset()), Rthread);
+  __ Assembler::ld4(t1, t1);
+  __ cmp4_eq(ptmp0, ptmp1, t0, t1);
+  __ br_cond(skip, ptmp0);
+  __ far_call(StubRoutines::method_entry_barrier());
+  __ bind(skip);
+  assert(__ offset() - start == entry_barrier_size, "entry_barrier_size is wrong");
 }
 
 void BarrierSetAssembler::c2i_entry_barrier(MacroAssembler* masm) {

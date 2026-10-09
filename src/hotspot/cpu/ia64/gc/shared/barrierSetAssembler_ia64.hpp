@@ -67,6 +67,10 @@ public:
 
   virtual void barrier_stubs_init() {}
 
+  // Size of the nmethod entry barrier in bytes, and the guard's offset in it
+  // (barrierSetAssembler_ia64.cpp).
+  static const int entry_barrier_size = 16 * BytesPerBundle;
+  static const int entry_barrier_guard_offset = BytesPerBundle;
   virtual void nmethod_entry_barrier(MacroAssembler* masm);
   virtual void c2i_entry_barrier(MacroAssembler* masm);
 };

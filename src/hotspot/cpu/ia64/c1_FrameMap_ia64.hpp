@@ -41,7 +41,7 @@
   static const int pd_c_runtime_reserved_arg_size;
 
   enum {
-    first_available_sp_in_frame = 0,
+    first_available_sp_in_frame = 16,   // the psABI scratch area: nothing live there
     frame_pad_in_bytes = 16,
     nof_reg_args = 8
   };

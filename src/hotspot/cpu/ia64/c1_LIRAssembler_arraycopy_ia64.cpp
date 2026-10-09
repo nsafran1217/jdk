@@ -63,7 +63,13 @@ void LIR_Assembler::arraycopy_assert(Register src, Register dst, Register tmp, c
 }
 
 void LIR_Assembler::emit_arraycopy(LIR_OpArrayCopy* op) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: LIR_Assembler::emit_arraycopy)
+  // Every arraycopy takes the stub's path for now: a Java call to
+  // System.arraycopy, whose operands the LIRGenerator already put in the
+  // Java argument registers (ArrayCopyStub). The inline checks and the
+  // arraycopy stubs come later (JIT-SCOPE.md C1-3).
+  ArrayCopyStub* stub = op->stub();
+  __ j(*stub->entry());
+  __ bind(*stub->continuation());
 }
 
 

@@ -42,32 +42,37 @@ private:
     return op->is_double_cpu() ? op->as_register_lo() : op->as_register();
   }
 
-  Address as_Address(LIR_Address* addr, Register tmp);
+  // The condition register pair of the flags-style LIR (JIT-SCOPE.md, C1-0):
+  // comp_op sets pcond to the compare's condition and pncond to its
+  // complement; a float compare also sets punord when either operand is NaN.
+  // emit_opBranch and cmove read them. No MacroAssembler helper touches
+  // p10-p13, so the moves LinearScan inserts between a compare and its
+  // branch preserve them.
+  static constexpr PredicateRegister pcond  = p10;
+  static constexpr PredicateRegister pncond = p11;
+  static constexpr PredicateRegister punord = p12;
+  static constexpr PredicateRegister pord   = p13;
 
-  // helper functions which checks for overflow and sets bailout if it
-  // occurs.  Always returns a valid embeddable pointer but in the
-  // bailout case the pointer won't be to unique storage.
+  // IA-64 has no displacement addressing: the effective address of addr in a
+  // register -- addr's base itself when there is nothing to add, else tmp
+  // (and nothing else). Emitting this before
+  // the access lets an implicit null check record the access's own pc.
+  Register addr_reg(LIR_Address* addr, Register tmp);
+  Register stack_slot_addr_reg(int index, int adjust = 0);
+
   address float_constant(float f);
   address double_constant(double d);
   address int_constant(jlong n);
-
-  // Ensure we have a valid Address (base + offset) to a stack-slot.
-  Address stack_slot_address(int index, uint shift, int adjust = 0);
 
   // Record the type of the receiver in ReceiverTypeData
   void type_profile_helper(Register mdo,
                            ciMethodData *md, ciProfileData *data,
                            Register recv, Label* update_done);
 
-  void casw(Register addr, Register newval, Register cmpval);
-  void caswu(Register addr, Register newval, Register cmpval);
-  void casl(Register addr, Register newval, Register cmpval);
-
   void deoptimize_trap(CodeEmitInfo *info);
 
   // Sizes in bytes; every IA-64 instruction is a 16-byte bundle, a movl one
-  // bundle too. Generous until the stubs are written (C1-1); the shared code
-  // only checks that the emitted code fits.
+  // bundle too.
   enum {
     // static call stub: movl Rmethod; movl t0; mov b6 = t0; br b6
     _call_stub_size = 8 * BytesPerBundle,
@@ -77,42 +82,20 @@ private:
     _deopt_handler_size = 8 * BytesPerBundle
   };
 
-
-  void check_conflict(ciKlass* exact_klass, intptr_t current_klass, Register tmp,
-                      Label &next, Label &none, Address mdo_addr);
-  void check_no_conflict(ciKlass* exact_klass, intptr_t current_klass, Register tmp, Address mdo_addr, Label &next);
-
-  void check_exact_klass(Register tmp, ciKlass* exact_klass);
-
-  void check_null(Register tmp, Label &update, intptr_t current_klass, Address mdo_addr, bool do_update, Label &next);
-
-  void (MacroAssembler::*add)(Register prev, RegisterOrConstant incr, Register addr);
-  void (MacroAssembler::*xchg)(Register prev, Register newv, Register addr);
-
-  void get_op(BasicType type);
-
   // emit_typecheck_helper sub functions
-  void data_check(LIR_OpTypeCheck *op, ciMethodData **md, ciProfileData **data);
   void typecheck_helper_slowcheck(ciKlass* k, Register obj, Register Rtmp1,
                                   Register k_RInfo, Register klass_RInfo,
                                   Label* failure_target, Label* success_target);
-  void profile_object(ciMethodData* md, ciProfileData* data, Register obj,
-                      Register k_RInfo, Register klass_RInfo, Label* obj_is_null);
   void typecheck_loaded(LIR_OpTypeCheck* op, ciKlass* k, Register k_RInfo);
+  void slow_subtype_check(Register sub_klass, Register super_klass, Label* failure_target);
 
   // emit_opTypeCheck sub functions
-  void typecheck_lir_store(LIR_OpTypeCheck* op, bool should_profile);
+  void typecheck_lir_store(LIR_OpTypeCheck* op);
 
-  void lir_store_slowcheck(Register k_RInfo, Register klass_RInfo, Register Rtmp1,
-                           Label* success_target, Label* failure_target);
+  // The value of a constant operand in a register: r0 for zero, else t1.
+  Register const_reg(LIR_Opr opr);
 
-  void const2reg_helper(LIR_Opr src);
-
-  void emit_branch(LIR_Condition cmp_flag, LIR_Opr cmp1, LIR_Opr cmp2, Label& label, bool is_far, bool is_unordered);
-
-  void logic_op_reg32(Register dst, Register left, Register right, LIR_Code code);
   void logic_op_reg(Register dst, Register left, Register right, LIR_Code code);
-  void logic_op_imm(Register dst, Register left, int right, LIR_Code code);
 
 public:
 

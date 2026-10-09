@@ -688,14 +688,25 @@ class Assembler : public AbstractAssembler {
   void frcpa(FloatRegister f1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP) {
     emit_f(ia64::Frcpa(f1->encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().w(f1).w(p2).r(f2).r(f3).r(qp).fp_predicate());
   }
+  // f1 ~= 1 / sqrt(f3), p2 = whether software refinement is needed; when p2
+  // is cleared f1 already holds the IEEE square root (zeros, infinities,
+  // NaNs, negative operands). vol. 3 frsqrta.
+  void frsqrta(FloatRegister f1, PredicateRegister p2, FloatRegister f3, QP) {
+    emit_f(ia64::Frsqrta(f1->encoding(), p2.encoding(), f3->encoding(), ia64::sf0, Q), D().w(f1).w(p2).r(f3).r(qp).fp_predicate());
+  }
   // f1 = f3 with its sign inverted: exact, and NaN-preserving.
   void fneg(FloatRegister f1, FloatRegister f3, QP)                     { emit_f(ia64::FmergeNs(f1->encoding(), f3->encoding(), f3->encoding(), Q), D().w(f1).r(f3).r(qp)); }
   // f1 = the 64-bit signed integer in f2's significand, as a floating value
   // (exact in register format; round with fnorm_s / fnorm_d after).
   void fcvt_xf(FloatRegister f1, FloatRegister f2, QP)                  { emit_f(ia64::FcvtXf(f1->encoding(), f2->encoding(), Q), D().w(f1).r(f2).r(qp)); }
+  // f1's significand = f2 converted to a signed 64-bit integer, rounding
+  // toward zero. NaN and out-of-range values give the integer indefinite
+  // 0x8000000000000000 (Invalid Operation is disabled; vol. 3 fcvt.fx).
+  void fcvt_fx_trunc(FloatRegister f1, FloatRegister f2, ia64::FpSf sf, QP) { emit_f(ia64::FcvtFxTrunc(f1->encoding(), f2->encoding(), sf, Q), D().w(f1).r(f2).r(qp)); }
   // p1 = relation, p2 = !relation; an unordered operand makes eq/lt/le false.
   void fcmp_eq(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpEq(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().w(p1).w(p2).r(f2).r(f3).r(qp).fp_predicate()); }
   void fcmp_lt(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpLt(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().w(p1).w(p2).r(f2).r(f3).r(qp).fp_predicate()); }
+  void fcmp_le(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpLe(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().w(p1).w(p2).r(f2).r(f3).r(qp).fp_predicate()); }
   void fcmp_unord(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP) { emit_f(ia64::FcmpUnord(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().w(p1).w(p2).r(f2).r(f3).r(qp).fp_predicate()); }
 
   // r1 = r2 with its eight bytes reversed.

@@ -591,16 +591,19 @@ LIR_Opr LIRGenerator::atomic_cmpxchg(BasicType type, LIR_Opr addr, LIRItem& cmp_
   new_value.load_item();
   cmp_value.load_item();
   LIR_Opr result = new_register(T_INT);
+  // The CAS op itself sets result to 1 on success, 0 on failure
+  // (LIR_Assembler::emit_compare_and_swap). riscv leaves the outcome in t0
+  // for a separate xor, but on IA-64 a spill move LinearScan places between
+  // the two ops may use t0 for its address.
   if (is_reference_type(type)) {
-    __ cas_obj(addr, cmp_value.result(), new_value.result(), new_register(T_INT), new_register(T_INT), result);
+    __ cas_obj(addr, cmp_value.result(), new_value.result(), ill, ill, result);
   } else if (type == T_INT) {
-    __ cas_int(addr->as_address_ptr()->base(), cmp_value.result(), new_value.result(), ill, ill);
+    __ cas_int(addr->as_address_ptr()->base(), cmp_value.result(), new_value.result(), ill, ill, result);
   } else if (type == T_LONG) {
-    __ cas_long(addr->as_address_ptr()->base(), cmp_value.result(), new_value.result(), ill, ill);
+    __ cas_long(addr->as_address_ptr()->base(), cmp_value.result(), new_value.result(), ill, ill, result);
   } else {
     ShouldNotReachHere();
   }
-  __ logical_xor(FrameMap::t0_opr, LIR_OprFact::intConst(1), result);
   return result;
 }
 

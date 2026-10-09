@@ -31,6 +31,7 @@
 #include "c1/c1_LIRAssembler.hpp"
 #include "c1/c1_MacroAssembler.hpp"
 #include "c1/c1_Runtime1.hpp"
+#include "code/compiledIC.hpp"
 #include "classfile/javaClasses.hpp"
 #include "nativeInst_ia64.hpp"
 #include "runtime/sharedRuntime.hpp"
@@ -40,15 +41,56 @@
 #define __ ce->masm()->
 
 void C1SafepointPollStub::emit_code(LIR_Assembler* ce) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: masm)
+  // The return poll (LIR_Assembler::return_op): the frame is already gone
+  // and b0 holds the return address. Record the poll's pc, position-
+  // independently, for the handler blob.
+  __ bind(_entry);
+  __ mov_from_ip(t0);
+  __ add_imm(t0, t0, safepoint_offset() - __ offset() + (int)BytesPerBundle, t1);
+  __ st8(Address(Rthread, JavaThread::saved_exception_pc_offset()), t0, t1);
+  __ far_jump(SharedRuntime::polling_page_return_handler_blob()->entry_point());
 }
 
 void CounterOverflowStub::emit_code(LIR_Assembler* ce) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: CounterOverflowStub::emit_code)
+  __ bind(_entry);
+  Metadata *m = _method->as_constant_ptr()->as_metadata();
+  __ mov_metadata(C1_MacroAssembler::stub_arg1, m);
+  __ mov_immediate(C1_MacroAssembler::stub_arg0, _bci);
+  __ far_call(Runtime1::entry_for(C1StubId::counter_overflow_id));
+  ce->add_call_info_here(_info);
+  ce->verify_oop_map(_info);
+  __ j(_continuation);
 }
 
 void RangeCheckStub::emit_code(LIR_Assembler* ce) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: RangeCheckStub::emit_code)
+  __ bind(_entry);
+  if (_info->deoptimize_on_exception()) {
+    address a = Runtime1::entry_for(C1StubId::predicate_failed_trap_id);
+    __ far_call(a);
+    ce->add_call_info_here(_info);
+    ce->verify_oop_map(_info);
+    DEBUG_ONLY(__ should_not_reach_here());
+    return;
+  }
+
+  // The arguments go in stub_arg0/1 (t2/t3): never allocated, so free here.
+  if (_index->is_cpu_register()) {
+    __ mov(C1_MacroAssembler::stub_arg0, _index->as_register());
+  } else {
+    __ mov_immediate(C1_MacroAssembler::stub_arg0, _index->as_jint());
+  }
+  C1StubId stub_id;
+  if (_throw_index_out_of_bounds_exception) {
+    stub_id = C1StubId::throw_index_exception_id;
+  } else {
+    assert(_array != LIR_Opr::nullOpr(), "sanity");
+    __ mov(C1_MacroAssembler::stub_arg1, _array->as_pointer_register());
+    stub_id = C1StubId::throw_range_check_failed_id;
+  }
+  __ far_call(Runtime1::entry_for(stub_id));
+  ce->add_call_info_here(_info);
+  ce->verify_oop_map(_info);
+  DEBUG_ONLY(__ should_not_reach_here());
 }
 
 PredicateFailedStub::PredicateFailedStub(CodeEmitInfo* info) {
@@ -56,11 +98,25 @@ PredicateFailedStub::PredicateFailedStub(CodeEmitInfo* info) {
 }
 
 void PredicateFailedStub::emit_code(LIR_Assembler* ce) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: PredicateFailedStub::emit_code)
+  __ bind(_entry);
+  address a = Runtime1::entry_for(C1StubId::predicate_failed_trap_id);
+  __ far_call(a);
+  ce->add_call_info_here(_info);
+  ce->verify_oop_map(_info);
+  DEBUG_ONLY(__ should_not_reach_here());
 }
 
 void DivByZeroStub::emit_code(LIR_Assembler* ce) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: DivByZeroStub::emit_code)
+  if (_offset != -1) {
+    ce->compilation()->implicit_exception_table()->append(_offset, __ offset());
+  }
+  __ bind(_entry);
+  __ far_call(Runtime1::entry_for(C1StubId::throw_div0_exception_id));
+  ce->add_call_info_here(_info);
+  ce->verify_oop_map(_info);
+#ifdef ASSERT
+  __ should_not_reach_here();
+#endif
 }
 
 // Implementation of NewInstanceStub
@@ -77,7 +133,14 @@ NewInstanceStub::NewInstanceStub(LIR_Opr klass_reg, LIR_Opr result, ciInstanceKl
 }
 
 void NewInstanceStub::emit_code(LIR_Assembler* ce) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: NewInstanceStub::emit_code)
+  assert(__ rsp_offset() == 0, "frame size should be fixed");
+  __ bind(_entry);
+  __ mov(as_Register(FrameMap::stub_klass_reg), _klass_reg->as_register());
+  __ far_call(Runtime1::entry_for(_stub_id));
+  ce->add_call_info_here(_info);
+  ce->verify_oop_map(_info);
+  assert(_result->as_register() == r8, "result must in r8");
+  __ j(_continuation);
 }
 
 // Implementation of NewTypeArrayStub
@@ -89,7 +152,15 @@ NewTypeArrayStub::NewTypeArrayStub(LIR_Opr klass_reg, LIR_Opr length, LIR_Opr re
 }
 
 void NewTypeArrayStub::emit_code(LIR_Assembler* ce) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: NewTypeArrayStub::emit_code)
+  assert(__ rsp_offset() == 0, "frame size should be fixed");
+  __ bind(_entry);
+  assert(_length->as_register() == as_Register(FrameMap::stub_length_reg), "length must in stub_length_reg");
+  assert(_klass_reg->as_register() == as_Register(FrameMap::stub_klass_reg), "klass_reg must in stub_klass_reg");
+  __ far_call(Runtime1::entry_for(C1StubId::new_type_array_id));
+  ce->add_call_info_here(_info);
+  ce->verify_oop_map(_info);
+  assert(_result->as_register() == r8, "result must in r8");
+  __ j(_continuation);
 }
 
 // Implementation of NewObjectArrayStub
@@ -101,15 +172,50 @@ NewObjectArrayStub::NewObjectArrayStub(LIR_Opr klass_reg, LIR_Opr length, LIR_Op
 }
 
 void NewObjectArrayStub::emit_code(LIR_Assembler* ce) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: NewObjectArrayStub::emit_code)
+  assert(__ rsp_offset() == 0, "frame size should be fixed");
+  __ bind(_entry);
+  assert(_length->as_register() == as_Register(FrameMap::stub_length_reg), "length must in stub_length_reg");
+  assert(_klass_reg->as_register() == as_Register(FrameMap::stub_klass_reg), "klass_reg must in stub_klass_reg");
+  __ far_call(Runtime1::entry_for(C1StubId::new_object_array_id));
+  ce->add_call_info_here(_info);
+  ce->verify_oop_map(_info);
+  assert(_result->as_register() == r8, "result must in r8");
+  __ j(_continuation);
 }
 
 void MonitorEnterStub::emit_code(LIR_Assembler* ce) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: MonitorEnterStub::emit_code)
+  assert(__ rsp_offset() == 0, "frame size should be fixed");
+  __ bind(_entry);
+  __ mov(C1_MacroAssembler::stub_arg0, _obj_reg->as_register());
+  __ mov(C1_MacroAssembler::stub_arg1, _lock_reg->as_register());
+  C1StubId enter_id;
+  if (ce->compilation()->has_fpu_code()) {
+    enter_id = C1StubId::monitorenter_id;
+  } else {
+    enter_id = C1StubId::monitorenter_nofpu_id;
+  }
+  __ far_call(Runtime1::entry_for(enter_id));
+  ce->add_call_info_here(_info);
+  ce->verify_oop_map(_info);
+  __ j(_continuation);
 }
 
 void MonitorExitStub::emit_code(LIR_Assembler* ce) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: MonitorExitStub::emit_code)
+  __ bind(_entry);
+  if (_compute_lock) {
+    // lock_reg was destroyed by fast unlocking attempt => recompute it
+    ce->monitor_address(_monitor_ix, _lock_reg);
+  }
+  __ mov(C1_MacroAssembler::stub_arg0, _lock_reg->as_register());
+  // note: non-blocking leaf routine => no call info needed
+  C1StubId exit_id;
+  if (ce->compilation()->has_fpu_code()) {
+    exit_id = C1StubId::monitorexit_id;
+  } else {
+    exit_id = C1StubId::monitorexit_nofpu_id;
+  }
+  __ far_call(Runtime1::entry_for(exit_id));
+  __ j(_continuation);
 }
 
 // Implementation of patching:
@@ -123,27 +229,92 @@ void MonitorExitStub::emit_code(LIR_Assembler* ce) {
 int PatchingStub::_patch_info_offset = -NativeGeneralJump::instruction_size;
 
 void PatchingStub::align_patch_site(MacroAssembler* masm) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: PatchingStub::align_patch_site)
+  // IA-64 does not patch: it deoptimizes instead (deoptimize_trap).
 }
 
 void PatchingStub::emit_code(LIR_Assembler* ce) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: PatchingStub::emit_code)
+  assert(false, "IA-64 should not use C1 runtime patching");
 }
 
 void DeoptimizeStub::emit_code(LIR_Assembler* ce) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: DeoptimizeStub::emit_code)
+  __ bind(_entry);
+  __ mov_immediate(C1_MacroAssembler::stub_arg0, _trap_request);
+  __ far_call(Runtime1::entry_for(C1StubId::deoptimize_id));
+  ce->add_call_info_here(_info);
+  DEBUG_ONLY(__ should_not_reach_here());
 }
 
 void ImplicitNullCheckStub::emit_code(LIR_Assembler* ce) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: ImplicitNullCheckStub::emit_code)
+  address a = nullptr;
+  if (_info->deoptimize_on_exception()) {
+    // Deoptimize, do not throw the exception, because it is probably wrong to do it here.
+    a = Runtime1::entry_for(C1StubId::predicate_failed_trap_id);
+  } else {
+    a = Runtime1::entry_for(C1StubId::throw_null_pointer_exception_id);
+  }
+
+  ce->compilation()->implicit_exception_table()->append(_offset, __ offset());
+  __ bind(_entry);
+  __ far_call(a);
+  ce->add_call_info_here(_info);
+  ce->verify_oop_map(_info);
+  DEBUG_ONLY(__ should_not_reach_here());
 }
 
 void SimpleExceptionStub::emit_code(LIR_Assembler* ce) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: SimpleExceptionStub::emit_code)
+  assert(__ rsp_offset() == 0, "frame size should be fixed");
+
+  __ bind(_entry);
+  // pass the object in stub_arg0, never allocated, because all other
+  // registers must be preserved
+  if (_obj->is_cpu_register()) {
+    __ mov(C1_MacroAssembler::stub_arg0, _obj->as_register());
+  }
+  __ far_call(Runtime1::entry_for(_stub));
+  ce->add_call_info_here(_info);
+  DEBUG_ONLY(__ should_not_reach_here());
 }
 
 void ArrayCopyStub::emit_code(LIR_Assembler* ce) {
-  Unimplemented(); // IA-64 C1: not yet ported (riscv: ArrayCopyStub::emit_code)
+  // ---------------slow case: call to native-----------------
+  __ bind(_entry);
+  // Figure out where the args should go
+  // This should really convert the IntrinsicID to the Method* and signature
+  // but I don't know how to do that.
+  const int args_num = 5;
+  VMRegPair args[args_num];
+  BasicType signature[args_num] = { T_OBJECT, T_INT, T_OBJECT, T_INT, T_INT };
+  SharedRuntime::java_calling_convention(signature, args, args_num);
+
+  // push parameters
+  Register r[args_num];
+  r[0] = src()->as_register();
+  r[1] = src_pos()->as_register();
+  r[2] = dst()->as_register();
+  r[3] = dst_pos()->as_register();
+  r[4] = length()->as_register();
+
+  // next registers will get stored on the stack, above the psABI scratch area
+  for (int j = 0; j < args_num; j++) {
+    VMReg r_1 = args[j].first();
+    if (r_1->is_stack()) {
+      int st_off = (r_1->reg2stack() + SharedRuntime::out_preserve_stack_slots()) * VMRegImpl::stack_slot_size;
+      __ st8(Address(sp, st_off), r[j]);
+    } else {
+      assert(r[j] == args[j].first()->as_Register(), "Wrong register for arg");
+    }
+  }
+
+  ce->align_call(lir_static_call);
+
+  ce->emit_static_call_stub();
+  if (ce->compilation()->bailed_out()) {
+    return; // CodeCache is full
+  }
+  __ far_call(SharedRuntime::get_resolve_static_call_stub(), static_call_Relocation::spec());
+  ce->add_call_info_here(info());
+
+  __ j(_continuation);
 }
 
 #undef __

@@ -870,7 +870,7 @@ void MacroAssembler::safepoint_poll(Label& slow_path, bool at_return, bool acqui
 // and the final predicated fma leaves it alone. Names follow div.md.
 
 void MacroAssembler::fdiv_s(FloatRegister dst, FloatRegister a, FloatRegister b) {
-  const FloatRegister y = f10, e = f11, y1 = f12, y2 = f13;
+  const FloatRegister y = f2, e = f3, y1 = f4, y2 = f5;
   assert_different_registers(a, b, y, e, y1, y2);
   const PredicateRegister p = ptmp0;
   frcpa(y, p, a, b);                       // y  = 1 / b, approximately
@@ -885,7 +885,7 @@ void MacroAssembler::fdiv_s(FloatRegister dst, FloatRegister a, FloatRegister b)
 }
 
 void MacroAssembler::fdiv_d(FloatRegister dst, FloatRegister a, FloatRegister b) {
-  const FloatRegister y = f10, e = f11, yn = f12, q = f13, r = f14;
+  const FloatRegister y = f2, e = f3, yn = f4, q = f5, r = f6;
   assert_different_registers(a, b, y, e, yn, q, r);
   const PredicateRegister p = ptmp0;
   frcpa(y, p, a, b);                       // y  = 1 / b, approximately
@@ -899,6 +899,133 @@ void MacroAssembler::fdiv_d(FloatRegister dst, FloatRegister a, FloatRegister b)
   fnma (r,  b,  q,  a,   ia64::sf1, p);    // r  = a - (b * q)
   fma_d(y,  r,  yn, q,   ia64::sf0, p);    // Q  = double(q + (r * y3)), else y
   fmov(dst, y);
+}
+
+// dst = sqrt(src), correctly rounded to double: GCC's sqrtdf2_internal_thr
+// (div.md), Intel's IEEE-correct sequence -- frsqrta refined on sf1, the last
+// step rounded to double. Special operands (frsqrta clears ptmp0) take
+// frsqrta's own result. Clobbers f2-f6, t1 and ptmp0; dst may be src.
+void MacroAssembler::fsqrt_d(FloatRegister dst, FloatRegister b) {
+  const FloatRegister y = f2, g = f3, h = f4, r = f5, c = f6;
+  assert_different_registers(b, y, g, h, r, c);
+  const PredicateRegister p = ptmp0;
+  movl(t1, (uint64_t)0x3FE0000000000000ULL);   // 0.5
+  setf_d(c, t1);
+  frsqrta(y, p, b);                        // y  = 1 / sqrt(b), approximately
+  fma (g, b, y, f0, ia64::sf1, p);         // g  = b * y
+  fma (h, c, y, f0, ia64::sf1, p);         // h  = 0.5 * y
+  fnma(r, g, h, c,  ia64::sf1, p);         // r  = 0.5 - (g * h)
+  fma (g, g, r, g,  ia64::sf1, p);         // g1 = g + (g * r)
+  fma (h, h, r, h,  ia64::sf1, p);         // h1 = h + (h * r)
+  fnma(r, g, h, c,  ia64::sf1, p);         // r1 = 0.5 - (g1 * h1)
+  fma (g, g, r, g,  ia64::sf1, p);         // g2 = g1 + (g1 * r1)
+  fma (h, h, r, h,  ia64::sf1, p);         // h2 = h1 + (h1 * r1)
+  fnma(r, g, g, b,  ia64::sf1, p);         // d  = b - (g2 * g2)
+  fma (g, r, h, g,  ia64::sf1, p);         // g3 = g2 + (d * h2)
+  fnma(r, g, g, b,  ia64::sf1, p);         // d1 = b - (g3 * g3)
+  fma_d(y, r, h, g, ia64::sf1, p);         // g4 = double(g3 + (d1 * h2)), else y
+  fmov(dst, y);
+}
+
+// ---- integer division ---------------------------------------------------------
+//
+// IA-64 has no integer divide. GCC's divdi3_internal_thr (div.md), Intel's
+// IEEE-proven maximum-throughput sequence: both operands converted to register
+// format, frcpa refined by Newton-Raphson on sf1 (extended precision, widened
+// exponent range), the quotient truncated by fcvt.fx.trunc. Exact for every
+// pair of 64-bit signed operands; Java's one overflow, MIN_VALUE / -1, gives
+// 2^63, which fcvt.fx.trunc turns into the integer indefinite 0x8000...0 --
+// MIN_VALUE, as Java requires (and the remainder is then 0). Ints, being kept
+// sign-extended, go through the same sequence. The temporaries are f2-f6,
+// which C1 never allocates (FRAME-DESIGN.md 2.2).
+
+void MacroAssembler::java_div_rem(Register dst, Register a, Register b, bool want_rem) {
+  const FloatRegister fa = f2, fb = f3, y = f4, e = f5, yn = f6;
+  const PredicateRegister p = ptmp0;
+  assert_different_registers(a, t1);
+  assert_different_registers(b, t1);
+  setf_sig(fa, a);
+  setf_sig(fb, b);
+  fcvt_xf(fa, fa);
+  fcvt_xf(fb, fb);
+  frcpa(y, p, fa, fb);                     // y  = 1 / b, approximately
+  fnma(e,  fb, y,  f1, ia64::sf1, p);      // e  = 1 - (b * y)
+  fma (yn, y,  e,  y,  ia64::sf1, p);      // y1 = y + (y * e)
+  fma (e,  e,  e,  f0, ia64::sf1, p);      // e1 = e * e
+  fma (yn, yn, e,  yn, ia64::sf1, p);      // y2 = y1 + (y1 * e1)
+  fma (e,  yn, fa, f0, ia64::sf1, p);      // q2 = y2 * a          (e is dead)
+  fnma(fa, fb, e,  fa, ia64::sf1, p);      // r  = a - (b * q2)    (fa reused)
+  fma (y,  fa, yn, e,  ia64::sf1, p);      // q3 = q2 + (r * y2), else y
+  fcvt_fx_trunc(y, y, ia64::sf1);
+  if (!want_rem) {
+    getf_sig(dst, y);
+    return;
+  }
+  // a - q * b, multiplying in the significand path (no integer multiplier).
+  setf_sig(fb, b);
+  xma_l(fb, y, fb, f0);
+  getf_sig(t1, fb);
+  sub(dst, a, t1);
+}
+
+// ---- floating-point to integer conversions --------------------------------------
+//
+// Java semantics: truncate toward zero, NaN gives 0, out-of-range values
+// saturate. fcvt.fx.trunc gives the integer indefinite (0x8000...0) for NaN
+// and for anything outside the signed 64-bit range, which is already the
+// right answer for negative overflow; NaN and positive overflow are fixed up
+// with predicated moves. Clobbers f6, t1 and p6-p9.
+
+void MacroAssembler::java_fp_to_long(Register dst, FloatRegister src) {
+  fcvt_fx_trunc(f6, src, ia64::sf0);
+  getf_sig(dst, f6);
+  fcmp_lt(p8, p9, f0, src);                // src > 0 (false for NaN)
+  movl(t1, (uint64_t)min_jlong);
+  cmp_eq(p8, p9, dst, t1, p8);             // ... and it overflowed
+  adds(dst, -1, dst, p8);                  // MIN_VALUE - 1 == MAX_VALUE
+  fcmp_unord(p6, p7, src, src);
+  mov(dst, zr, p6);                        // NaN
+}
+
+void MacroAssembler::java_fp_to_int(Register dst, FloatRegister src) {
+  java_fp_to_long(dst, src);
+  // Saturate to the int range; the result stays sign-extended.
+  mov_immediate(t1, max_jint);
+  cmp_lt(p8, p9, t1, dst);
+  mov(dst, t1, p8);
+  mov_immediate(t1, min_jint);
+  cmp_lt(p8, p9, dst, t1);
+  mov(dst, t1, p8);
+}
+
+// ---- oops and metadata in code ------------------------------------------------
+//
+// The value is a movl immediate under an oop/metadata relocation with a
+// table index (never "immediate" relocations: a movl's 64 bits are scattered
+// across its bundle, so there is no word for the GC to update in place). The
+// table entry is the real home of the value; fix_oop_relocations rewrites
+// the movl from it (Relocation::pd_set_data_value).
+
+void MacroAssembler::movoop(Register dst, jobject obj) {
+  int oop_index;
+  if (obj == nullptr) {
+    oop_index = oop_recorder()->allocate_oop_index(obj);
+  } else {
+    oop_index = oop_recorder()->find_index(obj);
+  }
+  relocate(oop_Relocation::spec(oop_index));
+  movl(dst, (uint64_t)(uintptr_t)obj);
+}
+
+void MacroAssembler::mov_metadata(Register dst, Metadata* obj) {
+  int oop_index;
+  if (obj == nullptr) {
+    oop_index = oop_recorder()->allocate_metadata_index(obj);
+  } else {
+    oop_index = oop_recorder()->find_index(obj);
+  }
+  relocate(metadata_Relocation::spec(oop_index));
+  movl(dst, (uint64_t)(uintptr_t)obj);
 }
 
 // ---- lightweight locking ----------------------------------------------------

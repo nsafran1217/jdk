@@ -536,9 +536,33 @@ class MacroAssembler : public Assembler {
   // maximum-throughput sequences (gcc/config/ia64/div.md, divsf3_internal_thr
   // and divdf3_internal_thr), i.e. Intel's published IEEE-correct algorithms;
   // special operands (frcpa clears ptmp0) take frcpa's own result. dst may be
-  // a or b. Clobbers f10-f13 (fdiv_s) or f10-f14 (fdiv_d) and ptmp0.
+  // a or b. Clobbers f2-f5 (fdiv_s) or f2-f6 (fdiv_d) and ptmp0 -- registers
+  // C1 never allocates.
   void fdiv_s(FloatRegister dst, FloatRegister a, FloatRegister b);
   void fdiv_d(FloatRegister dst, FloatRegister a, FloatRegister b);
+
+  // dst = sqrt(src), correctly rounded to double. Clobbers f2-f6, t1, ptmp0.
+  void fsqrt_d(FloatRegister dst, FloatRegister src);
+
+  // dst = a / b, or a % b, for 64-bit signed a and b (ints sign-extended),
+  // b != 0, with Java's results for MIN_VALUE / -1. Inline, through the FP
+  // unit. Clobbers f2-f6, ptmp0 and (for the remainder) t1. dst may be a or b.
+  void java_div_rem(Register dst, Register a, Register b, bool want_rem);
+
+  // Java d2l/f2l and d2i/f2i: truncation, NaN -> 0, saturation. Clobbers f6,
+  // t1, p6-p9.
+  void java_fp_to_long(Register dst, FloatRegister src);
+  void java_fp_to_int(Register dst, FloatRegister src);
+
+  // f1 = |f3|: the sign of f0 (+0.0) with f3's exponent and significand.
+  void fabs(FloatRegister f1, FloatRegister f3, PredicateRegister qp = pTrue) {
+    emit_f(ia64::FmergeS(f1->encoding(), f0->encoding(), f3->encoding(), qp.encoding()),
+           D().w(f1).r(f3).r(qp));
+  }
+
+  // Oops and metadata embedded in code (relocated movl immediates).
+  void movoop(Register dst, jobject obj);
+  void mov_metadata(Register dst, Metadata* obj);
 
   // ---- debugging -----------------------------------------------------------
 

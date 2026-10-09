@@ -511,7 +511,7 @@ void SharedRuntime::gen_i2c_adapter(MacroAssembler *masm,
       // Convert stack slot to an SP offset
       int st_off = out_stack_base + r_1->reg2stack() * VMRegImpl::stack_slot_size;
       if (!r_2->is_valid()) {
-        __ ld4(t2, Address(Resp, ld_off));
+        __ ld4s(t2, Address(Resp, ld_off));
       } else {
         __ ld8(t2, Address(Resp, two_words ? next_off : ld_off));
       }
@@ -521,7 +521,9 @@ void SharedRuntime::gen_i2c_adapter(MacroAssembler *masm,
       if (r_2->is_valid()) {
         __ ld8(r, Address(Resp, two_words ? next_off : ld_off));
       } else {
-        __ ld4(r, Address(Resp, ld_off));
+        // Compiled code keeps ints sign-extended in registers, as the
+        // interpreter does (ld4 would zero-extend a negative int).
+        __ ld4s(r, Address(Resp, ld_off));
       }
     } else {
       FloatRegister f = r_1->as_FloatRegister();
@@ -578,15 +580,103 @@ void SharedRuntime::generate_i2c2i_adapters(MacroAssembler *masm,
   handler->set_entry_points(i2c_entry, c2i_entry, c2i_unverified_entry, c2i_no_clinit_check_entry);
 }
 
-// Native wrappers are nmethods. With -Xint the only one the VM asks for is
-// linkToNative's, which FFM (unsupported) needs; without -Xint the method-
-// handle intrinsics need them too. Arrives with C1.
+// The method-handle intrinsics' "native wrappers" (linkToStatic and
+// friends, invokeBasic): no native call, just a dispatch on the trailing
+// MemberName or the receiver's form, from the compiled calling convention.
+static void gen_special_dispatch(MacroAssembler* masm,
+                                 const methodHandle& method,
+                                 const BasicType* sig_bt,
+                                 const VMRegPair* regs) {
+  vmIntrinsics::ID iid = method->intrinsic_id();
+
+  // Now write the args into the outgoing interpreter space
+  bool     has_receiver   = false;
+  Register receiver_reg   = noreg;
+  int      member_arg_pos = -1;
+  Register member_reg     = noreg;
+  int      ref_kind       = MethodHandles::signature_polymorphic_intrinsic_ref_kind(iid);
+  if (ref_kind != 0) {
+    member_arg_pos = method->size_of_parameters() - 1;  // trailing MemberName argument
+    member_reg = r28;  // free at a call: not an argument, not a dispatch temp
+    has_receiver = MethodHandles::ref_kind_has_receiver(ref_kind);
+  } else if (iid == vmIntrinsics::_invokeBasic) {
+    has_receiver = true;
+  } else if (iid == vmIntrinsics::_linkToNative) {
+    member_arg_pos = method->size_of_parameters() - 1;  // trailing NativeEntryPoint argument
+    member_reg = r28;
+  } else {
+    fatal("unexpected intrinsic id %d", vmIntrinsics::as_int(iid));
+  }
+
+  if (member_reg != noreg) {
+    // Load the member_arg into register, if necessary.
+    SharedRuntime::check_member_name_argument_is_last_argument(method, sig_bt, regs);
+    VMReg r = regs[member_arg_pos].first();
+    if (r->is_stack()) {
+      // No frame is built: the caller's stack arguments sit above its 16-byte
+      // psABI scratch area, at our sp.
+      int off = (r->reg2stack() + SharedRuntime::out_preserve_stack_slots()) * VMRegImpl::stack_slot_size;
+      __ ld8(member_reg, Address(sp, off));
+    } else {
+      // no data motion is needed
+      member_reg = r->as_Register();
+    }
+  }
+
+  if (has_receiver) {
+    // Make sure the receiver is loaded into a register.
+    assert(method->size_of_parameters() > 0, "oob");
+    assert(sig_bt[0] == T_OBJECT, "receiver argument must be an object");
+    VMReg r = regs[0].first();
+    assert(r->is_valid(), "bad receiver arg");
+    if (r->is_stack()) {
+      // Porting note:  This assumes that compiled calling conventions always
+      // pass the receiver oop in a register.
+      fatal("receiver always in a register");
+    } else {
+      // no data motion is needed
+      receiver_reg = r->as_Register();
+    }
+  }
+
+  // Figure out which address we are really jumping to:
+  MethodHandles::generate_method_handle_dispatch(masm, iid,
+                                                 receiver_reg, member_reg, /*for_compiler_entry:*/ true);
+}
+
+// Native wrappers are nmethods. Real native methods stay interpreted for now
+// (PreferInterpreterNativeStubs, set in VM_Version::initialize; FRAME-DESIGN.md
+// 11.5); the method-handle intrinsics are generated here.
 nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
                                                 const methodHandle& method,
                                                 int compile_id,
                                                 BasicType* in_sig_bt,
                                                 VMRegPair* in_regs,
                                                 BasicType ret_type) {
+  if (method->is_method_handle_intrinsic()) {
+    intptr_t start = (intptr_t)__ pc();
+    int vep_offset = ((intptr_t)__ pc()) - start;
+
+    // First instruction must be a nop as it may need to be patched on deoptimisation
+    __ nop();
+    gen_special_dispatch(masm,
+                         method,
+                         in_sig_bt,
+                         in_regs);
+    int frame_complete = ((intptr_t)__ pc()) - start;  // not complete, period
+    __ flush();
+    int stack_slots = SharedRuntime::out_preserve_stack_slots();  // no out slots at all, actually
+    return nmethod::new_native_nmethod(method,
+                                       compile_id,
+                                       masm->code(),
+                                       vep_offset,
+                                       frame_complete,
+                                       stack_slots / VMRegImpl::slots_per_word,
+                                       in_ByteSize(-1),
+                                       in_ByteSize(-1),
+                                       (OopMapSet*)nullptr);
+  }
+  // A JNI wrapper for a real native method (C1-3).
   Unimplemented();
   return nullptr;
 }
@@ -629,19 +719,87 @@ void SharedRuntime::generate_deopt_blob() {
   _deopt_blob->set_unpack_with_exception_in_tls_offset(exception_in_tls_offset);
 }
 
+// The safepoint handler for compiled code's polls (FRAME-DESIGN.md 11.4).
+// Polls never fault here: a poll that finds the poll bit set branches to an
+// out-of-line stub, which stores the poll's pc in the thread's
+// saved_exception_pc and jumps here (LIR_Assembler::safepoint_poll,
+// C1SafepointPollStub).
+//
+// A loop poll (!cause_return) arrives with the method's frame live; the
+// frame laid down here takes the poll's pc as its return address, so the
+// method's frame is its sender at that pc, where the debug info is. On return
+// it resumes at the next bundle -- the poll is a predicated branch, and
+// returning to it would branch straight back -- unless the return address
+// was changed meanwhile (deoptimization). A return poll arrives with the
+// method's frame already removed and b0 the return address into its caller.
 SafepointBlob* SharedRuntime::generate_handler_blob(SharedStubId id, address call_ptr) {
   assert(is_polling_page_id(id), "expected a polling page stub id");
   ResourceMark rm;
   const char* name = SharedRuntime::stub_name(id);
-  CodeBuffer buffer(name, 1024, 512);
+  CodeBuffer buffer(name, 8192, 512);
   MacroAssembler* masm = new MacroAssembler(&buffer);
   OopMapSet* oop_maps = new OopMapSet();
-  // Polls in this port never fault -- they are thread-local loads -- so the
-  // polling-page handler is reachable only from compiled code's return
-  // polls, which do not exist yet.
-  trap(masm, "IA-64: safepoint handler blob (no compiled code yet)");
+
+  int start = __ offset();
+  int frame_size_in_words = -1;
+  bool cause_return = (id == SharedStubId::polling_page_return_handler_id);
+
+  if (!cause_return) {
+    __ ld8(t2, Address(Rthread, JavaThread::saved_exception_pc_offset()));
+    __ mov_to_br(breturn, t2);
+  }
+
+  // Save Integer and Float registers.
+  OopMap* map = RegisterSaver::save_live_registers(masm, &frame_size_in_words);
+
+  // The following is basically a call_VM. However, we need the precise
+  // address of the call in order to generate an oopmap.
+  Label retaddr;
+  __ set_last_Java_frame(sp, fp, retaddr, t2);
+  __ mov(c_rarg0, Rthread);
+  __ call_c(call_ptr);
+  __ bind(retaddr);
+
+  // Set an oopmap for the call site.  This oopmap will map all
+  // oop-registers and debug-info registers as callee-saved.  This
+  // will allow deoptimization at this safepoint to find all possible
+  // debug-info recordings, as well as let GC find all oops.
+  oop_maps->add_gc_map(__ offset() - start, map);
+
+  __ reset_last_Java_frame(false);
+
+  Label noException;
+  __ ld8(t1, Address(Rthread, Thread::pending_exception_offset()));
+  __ beqz(t1, noException);
+
+  // Exception pending: forward it as thrown at the return address.
+  RegisterSaver::restore_live_registers(masm);
+  __ far_jump(StubRoutines::forward_exception_entry());
+
+  // No exception case
+  __ bind(noException);
+
+  if (!cause_return) {
+    Label no_adjust;
+    // If our stashed return pc was modified by the runtime we avoid touching it
+    __ ld8(t2, Address(fp, frame::return_addr_offset * wordSize));
+    __ ld8(t3, Address(Rthread, JavaThread::saved_exception_pc_offset()));
+    __ bne(t2, t3, no_adjust);
+    // Step over the poll branch.
+    __ adds(t2, (int)BytesPerBundle, t2);
+    __ st8(Address(fp, frame::return_addr_offset * wordSize), t2);
+    __ bind(no_adjust);
+  }
+
+  // Normal exit, restore registers and exit.
+  RegisterSaver::restore_live_registers(masm);
+  __ ret();
+
+  // Make sure all code is generated
   masm->flush();
-  return SafepointBlob::create(&buffer, oop_maps, MacroAssembler::enter_frame_words());
+
+  // Fill-out other meta info
+  return SafepointBlob::create(&buffer, oop_maps, frame_size_in_words);
 }
 
 static RuntimeStub* trap_runtime_stub(const char* name, const char* what) {
