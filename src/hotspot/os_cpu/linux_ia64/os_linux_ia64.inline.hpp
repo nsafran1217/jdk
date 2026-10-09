@@ -25,4 +25,15 @@
 #ifndef OS_CPU_LINUX_IA64_OS_LINUX_IA64_INLINE_HPP
 #define OS_CPU_LINUX_IA64_OS_LINUX_IA64_INLINE_HPP
 
+#include "os_linux.hpp"
+
+// A C function pointer is the address of an {entry, gp} descriptor
+// (FRAME-DESIGN.md 3). For an exported function the dynamic linker may
+// allocate that descriptor in its own table, outside the library -- so code
+// that wants the library of a function pointer must resolve it first.
+#define HAVE_FUNCTION_DESCRIPTORS 1
+inline void* os::resolve_function_descriptor(void* p) {
+  return ((void* const*)p)[0];
+}
+
 #endif // OS_CPU_LINUX_IA64_OS_LINUX_IA64_INLINE_HPP

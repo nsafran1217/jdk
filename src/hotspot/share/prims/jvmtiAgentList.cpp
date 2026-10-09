@@ -261,11 +261,17 @@ JvmtiAgent* JvmtiAgentList::lookup(JvmtiEnv* env, void* f_ptr) {
   assert(f_ptr != nullptr, "invariant");
   static char buffer[JVM_MAXPATHLEN];
   int offset;
-  if (!os::dll_address_to_library_name(reinterpret_cast<address>(f_ptr), &buffer[0], JVM_MAXPATHLEN, &offset)) {
+  address code = reinterpret_cast<address>(f_ptr);
+#ifdef HAVE_FUNCTION_DESCRIPTORS
+  // f_ptr is a function descriptor, which need not lie in the agent's
+  // library (on IA-64 the dynamic linker may allocate it): use the code.
+  code = reinterpret_cast<address>(os::resolve_function_descriptor(f_ptr));
+#endif
+  if (!os::dll_address_to_library_name(code, &buffer[0], JVM_MAXPATHLEN, &offset)) {
     return nullptr;
   }
   assert(buffer[0] != '\0', "invariant");
-  const void* const os_module_address = reinterpret_cast<address>(f_ptr) - offset;
+  const void* const os_module_address = code - offset;
 
   JvmtiAgentList::Iterator it = JvmtiAgentList::agents();
   while (it.has_next()) {
