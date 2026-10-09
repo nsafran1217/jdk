@@ -272,7 +272,8 @@ public abstract class TestConstantsInError implements OutputProcessor {
         OutputAnalyzer outputC2 = ProcessTools.executeTestJava(c2Args)
                 .shouldHaveExitValue(0);
 
-        test.process(outputC2, false);
+        // A client VM has no C2: -XX:-TieredCompilation still compiles with C1.
+        test.process(outputC2, Platform.isClient());
     }
 
     public static void main(String[] args) throws Exception {
