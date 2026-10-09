@@ -750,7 +750,19 @@ void InterpreterMacroAssembler::leave_jfr_critical_section() {
 void InterpreterMacroAssembler::lock_object(Register lock_reg)
 {
   assert(lock_reg == c_rarg1, "The argument is only for looks. It must be c_rarg1");
-  call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorenter), lock_reg);
+  if (LockingMode == LM_LIGHTWEIGHT) {
+    Label slow_case, done;
+    const Register obj_reg = c_rarg3;   // will contain the oop
+    ld8(obj_reg, Address(lock_reg, BasicObjectLock::obj_offset()));
+    lightweight_lock(lock_reg, obj_reg, c_rarg2, c_rarg4, c_rarg5, slow_case);
+    br(done);
+    bind(slow_case);
+    call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorenter), lock_reg);
+    bind(done);
+  } else {
+    // LM_LEGACY has no fast path on IA-64 (LM_MONITOR is refused at startup).
+    call_VM(noreg, CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorenter), lock_reg);
+  }
 }
 
 // Unlocks an object. Used in monitorexit bytecode and
@@ -763,7 +775,21 @@ void InterpreterMacroAssembler::unlock_object(Register lock_reg)
 {
   assert(lock_reg == c_rarg1, "The argument is only for looks. It must be rarg1");
   save_bcp(); // Save in case of exception
-  call_VM_leaf(CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorexit), lock_reg);
+  if (LockingMode == LM_LIGHTWEIGHT) {
+    Label slow_case, done;
+    const Register obj_reg = c_rarg3;   // will contain the oop
+    ld8(obj_reg, Address(lock_reg, BasicObjectLock::obj_offset()));
+    // Free the entry; the slow path puts the object back first.
+    st8(Address(lock_reg, BasicObjectLock::obj_offset()), zr);
+    lightweight_unlock(obj_reg, c_rarg2, c_rarg4, c_rarg5, slow_case);
+    br(done);
+    bind(slow_case);
+    st8(Address(lock_reg, BasicObjectLock::obj_offset()), obj_reg); // restore obj
+    call_VM_leaf(CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorexit), lock_reg);
+    bind(done);
+  } else {
+    call_VM_leaf(CAST_FROM_FN_PTR(address, InterpreterRuntime::monitorexit), lock_reg);
+  }
 }
 
 // ---- profiling ----------------------------------------------------------------

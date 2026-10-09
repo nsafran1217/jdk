@@ -36,6 +36,10 @@ class VM_Version : public Abstract_VM_Version {
   static void initialize();
 
   constexpr static bool supports_stack_watermark_barrier() { return true; }
+  // The interpreter's lightweight_lock/unlock fast paths push and pop
+  // recursive (consecutive) lock-stack entries, so the shared lock-stack code
+  // must accept them.
+  constexpr static bool supports_recursive_lightweight_locking() { return true; }
 
   static void initialize_cpu_information(void);
 
