@@ -554,6 +554,10 @@ class Assembler : public AbstractAssembler {
 
   // r1 = address of the bundle holding this instruction.
   void mov_from_ip(Register r1, QP) { emit_i(ia64::MovFromIp(r1->encoding(), Q)); }
+  // r1 = all 64 predicates (bit i = PR i); pr = r2 under mask17 (-1: all).
+  // Barriers for stop elision: they read/write every predicate at once.
+  void mov_from_pr(Register r1, QP)            { emit_i(ia64::MovFromPr(r1->encoding(), Q)); }
+  void mov_to_pr(Register r2, int32_t mask17, QP) { emit_i(ia64::MovToPr(r2->encoding(), mask17, Q)); }
 
   // ---- atomics (M unit) --------------------------------------------------
   //

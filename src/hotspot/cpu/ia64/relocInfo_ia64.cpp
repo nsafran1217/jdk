@@ -28,11 +28,10 @@
 #include "oops/oop.inline.hpp"
 #include "runtime/safepoint.hpp"
 
-// Every relocatable value this port emits lives in the immediate of a movl:
-// a constant (NativeMovConstReg), or the target of a call or jump sequence
-// (NativeCall / NativeJump, whose first bundle is that movl). So setting or
-// reading a relocated value is reading or rewriting one movl immediate, and
-// targets are absolute: moving code changes none of them.
+// Every relocatable value this port emits is absolute, so moving code changes
+// none of them. Data values (oops, Metadata*, addresses) live in a movl
+// immediate (NativeMovConstReg); call destinations live in a NativeCall's
+// data cell; jump destinations in the movl of a far_jump.
 
 static bool is_movl_at(address a) {
   uint8_t tmpl = (uint8_t)(((const ia64::Bundle*)a)->lo & 0x1f);
@@ -49,17 +48,27 @@ void Relocation::pd_set_data_value(address x, bool verify_only) {
   ICache::invalidate_range(addr(), BytesPerBundle);
 }
 
+// A call relocation sits at the start of either a NativeCall (the cell form,
+// FRAME-DESIGN.md 11.2: the destination is in the cell) or a movl-form jump
+// (far_jump: the destination is the movl immediate). Both are absolute, so the
+// value read at the old location is the value to write at the new one.
 address Relocation::pd_call_destination(address orig_addr) {
   assert(is_call(), "should be an address instruction here");
-  // Absolute target: the same whether read at the old or the new location.
   address site = (orig_addr != nullptr) ? orig_addr : addr();
-  guarantee(is_movl_at(site), "IA-64: call site must start with a movl");
+  if (NativeCall::is_at(site)) {
+    return nativeCall_at(site)->destination();
+  }
+  guarantee(is_movl_at(site), "IA-64: unrecognised call site at " PTR_FORMAT, p2i(site));
   return (address)ia64::ReadMovlImm((const ia64::Bundle*)site);
 }
 
 void Relocation::pd_set_call_destination(address x) {
   assert(is_call(), "should be an address instruction here");
-  guarantee(is_movl_at(addr()), "IA-64: call site must start with a movl");
+  if (NativeCall::is_at(addr())) {
+    nativeCall_at(addr())->set_destination(x);
+    return;
+  }
+  guarantee(is_movl_at(addr()), "IA-64: unrecognised call site at " PTR_FORMAT, p2i(addr()));
   ia64::WriteMovlImm((ia64::Bundle*)addr(), (uint64_t)x);
   ICache::invalidate_range(addr(), BytesPerBundle);
 }

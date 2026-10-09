@@ -41,11 +41,13 @@
 //    bundle. If bundle packing is ever implemented that stops being true and
 //    every class below has to be revisited.
 //
-// 2. The instruction cache is *not* coherent with stores. Every patch here
-//    must be followed by an ICache::invalidate_range; unlike x86, getting this
-//    wrong produces a machine that keeps executing the old instruction. That
-//    is also why globalDefinitions_ia64.hpp defines DEOPTIMIZE_WHEN_PATCHING:
-//    a patch is not atomic against concurrent execution.
+// 2. The instruction cache is *not* coherent with stores. Every patch of an
+//    instruction must be followed by an ICache::invalidate_range; unlike x86,
+//    getting this wrong produces a machine that keeps executing the old
+//    instruction. Instruction patches are also not atomic against concurrent
+//    execution (a movl immediate spans both halves of its bundle), which is
+//    why globalDefinitions_ia64.hpp defines DEOPTIMIZE_WHEN_PATCHING and why
+//    call sites keep their destination in a data cell instead (NativeCall).
 
 class NativeCall;
 
@@ -93,29 +95,37 @@ inline NativeInstruction* nativeInstruction_at(address addr) {
 NativeCall* nativeCall_at(address addr);
 NativeCall* nativeCall_before(address return_address);
 
-// A call site. The port's call sequence materialises the target with movl,
-// moves it to a branch register and branches:
+// A call site: MacroAssembler::far_call's cell form (FRAME-DESIGN.md 11.2).
 //
-//     movl  t = <target>
-//     mov   b6 = t
-//     br.call.sptk.many b0 = b6
+//     br.cond.sptk L               bundle 0
+//     <destination cell>           bundle 1 (8-byte destination + padding)
+//  L: mov  t0 = ip                 bundle 2
+//     adds t0 = -16, t0            bundle 3
+//     ld8  t0 = [t0]               bundle 4
+//     mov  b6 = t0                 bundle 5
+//     br.call.sptk.many b0 = b6    bundle 6
 //
-// Three bundles, and the target lives in the movl immediate, which is what
-// destination()/set_destination() read and write.
+// Seven bundles. destination()/set_destination() read and write the cell with
+// one aligned 8-byte access, which is what makes set_destination_mt_safe
+// genuinely safe against concurrent execution.
 class NativeCall : private NativeInstruction {
  private:
   enum {
-    movl_offset      = 0,
-    mov_to_br_offset = BytesPerBundle,
-    br_call_offset   = 2 * BytesPerBundle,
-    call_size        = 3 * BytesPerBundle
+    branch_offset    = 0,
+    cell_offset      = 1 * BytesPerBundle,
+    mov_ip_offset    = 2 * BytesPerBundle,
+    adds_offset      = 3 * BytesPerBundle,
+    ld8_offset       = 4 * BytesPerBundle,
+    mov_to_br_offset = 5 * BytesPerBundle,
+    br_call_offset   = 6 * BytesPerBundle,
+    call_size        = 7 * BytesPerBundle
   };
 
  public:
   enum {
     instruction_size            = call_size,
     return_address_offset       = call_size,
-    displacement_offset         = 0
+    displacement_offset         = cell_offset
   };
 
   address instruction_address() const { return addr_at(0); }

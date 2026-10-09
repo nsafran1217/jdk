@@ -69,6 +69,20 @@ class MacroAssembler : public Assembler {
   // stream by less than 16 bytes, and it is always bundle-aligned, so any
   // smaller power-of-two alignment (shared code asks for wordSize) already
   // holds.
+  // Pad so that (offset() + target_size) is a multiple of modulus: code of
+  // target_size bytes emitted next then ends aligned (ic_check's VEP).
+  void align(int modulus, int target_size) {
+    assert(is_aligned(target_size, BytesPerBundle), "IA-64 code comes in bundles");
+    while ((offset() + target_size) % modulus != 0) {
+      nop();
+    }
+  }
+  // The inline-cache check at a compiled method's unverified entry
+  // (FRAME-DESIGN.md 11.2): receiver in j_rarg0, CompiledICData* in t1 (the
+  // register ic_call loads it into -- t0 belongs to the call sequence).
+  static int ic_check_size();
+  int ic_check(int end_alignment = BytesPerBundle);
+
   void align(int modulus) {
     assert(modulus % BytesPerBundle == 0 || BytesPerBundle % modulus == 0,
            "alignment must divide, or be a multiple of, the bundle size");
@@ -258,6 +272,9 @@ class MacroAssembler : public Assembler {
   // often generated in a buffer and copied. Clobbers t0 and b6 (and b0 for a
   // call). These are the sequences NativeCall / NativeJump describe.
   void far_call(address entry, PredicateRegister qp = pTrue);
+  void far_call(address entry, const RelocationHolder& rspec);
+  void emit_static_call_stub();
+  static int static_call_stub_size();
   void far_jump(address entry, PredicateRegister qp = pTrue);
   void jr(Register r, PredicateRegister qp = pTrue)    { mov_to_br(btmp, r); br_cond(btmp, qp); }
   void jalr(Register r)                                 { mov_to_br(btmp, r); br_call(breturn, btmp); }
@@ -551,5 +568,10 @@ class MacroAssembler : public Assembler {
 
   static void debug64(char* msg, int64_t pc, int64_t regs[]);
 };
+
+#ifdef ASSERT
+// inst_mark() is only used for relocation bookkeeping, never checked here.
+inline bool AbstractAssembler::pd_check_instruction_mark() { return false; }
+#endif
 
 #endif // CPU_IA64_MACROASSEMBLER_IA64_HPP

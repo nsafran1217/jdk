@@ -27,14 +27,16 @@
 #include "code/compiledIC.hpp"
 #include "nativeInst_ia64.hpp"
 #include "runtime/safepoint.hpp"
+#include "runtime/atomic.hpp"
 #include "utilities/ostream.hpp"
 
 // The sequences recognised here are exactly the ones MacroAssembler emits:
 //
-//   call:  movl t0 = target ; mov b6 = t0 ; br.call.sptk.many b0 = b6
-//   jump:  movl t0 = target ; mov b6 = t0 ; br.cond.sptk b6
+//   call:  br.cond L ; <cell> ; L: mov t0 = ip ; adds t0 = -16, t0 ;
+//          ld8 t0 = [t0] ; mov b6 = t0 ; br.call.sptk.many b0 = b6   (7 bundles)
+//   jump:  movl t0 = target ; mov b6 = t0 ; br.cond.sptk b6          (3 bundles)
 //
-// (MacroAssembler::far_call / far_jump.) Each is three whole bundles.
+// (MacroAssembler::far_call / far_jump.)
 
 static bool bundle_equals(address a, ia64::Bundle expected) {
   const ia64::Bundle* b = (const ia64::Bundle*)a;
@@ -80,7 +82,10 @@ bool NativeInstruction::is_call_at(address addr) {
 // ---- NativeCall ---------------------------------------------------------------
 
 bool NativeCall::is_at(address addr) {
-  return is_movl_t0_at(addr) &&
+  return bundle_equals(addr + branch_offset, ia64::BundleB(ia64::BrCondRel(2))) &&
+         bundle_equals(addr + mov_ip_offset, ia64::BundleI(ia64::MovFromIp(t0->encoding()))) &&
+         bundle_equals(addr + adds_offset, ia64::BundleM(ia64::Adds(t0->encoding(), -(int)BytesPerBundle, t0->encoding()))) &&
+         bundle_equals(addr + ld8_offset, ia64::BundleM(ia64::Ld8(t0->encoding(), t0->encoding()))) &&
          is_mov_b6_t0_at(addr + mov_to_br_offset) &&
          bundle_equals(addr + br_call_offset, ia64::BundleB(ia64::BrCall(breturn.encoding(), btmp.encoding())));
 }
@@ -92,23 +97,21 @@ NativeCall* nativeCall_before(address return_address) {
 }
 
 address NativeCall::destination() const {
-  return (address)ia64::ReadMovlImm(bundle_at(movl_offset));
+  return (address)Atomic::load((volatile uint64_t*)addr_at(cell_offset));
 }
 
+// The cell is data: no instruction-cache flush. The 8-byte aligned store is
+// atomic, so a thread executing the call sees either the old or the new
+// destination, never a mixture.
 void NativeCall::set_destination(address dest) {
-  ia64::WriteMovlImm(bundle_at(movl_offset), (uint64_t)dest);
-  ICache::invalidate_range(addr_at(movl_offset), BytesPerBundle);
+  assert(is_aligned(addr_at(cell_offset), BytesPerWord), "cell must be 8-byte aligned");
+  Atomic::store((volatile uint64_t*)addr_at(cell_offset), (uint64_t)dest);
 }
 
-// The movl immediate is split across both 64-bit halves of its bundle, so a
-// concurrent rewrite is not atomic against a thread executing it. This port
-// defines DEOPTIMIZE_WHEN_PATCHING (globalDefinitions_ia64.hpp), so such
-// patches happen with the code quiescent; insist on it. A truly concurrent
-// form would need st16 (Itanium 2 and later) -- left for C1.
 void NativeCall::set_destination_mt_safe(address dest) {
   assert(SafepointSynchronize::is_at_safepoint() || CodeCache_lock->owned_by_self() ||
          CompiledICLocker::is_safe(addr_at(0)),
-         "IA-64: call patching must happen with the code quiescent");
+         "IA-64: call patching outside a safepoint must hold the IC lock");
   set_destination(dest);
 }
 

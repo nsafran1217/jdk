@@ -34,6 +34,7 @@
 #include "runtime/safepointMechanism.hpp"
 #include "runtime/javaThread.hpp"
 #include "runtime/jniHandles.hpp"
+#include "code/compiledIC.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/stubRoutines.hpp"
 #include "utilities/globalDefinitions.hpp"
@@ -161,11 +162,92 @@ void MacroAssembler::call_c(Register function_descriptor) {
   br_call(breturn, btmp);
 }
 
+// A patchable call (FRAME-DESIGN.md 11.2). The destination lives in an
+// 8-byte data cell inline in the call sequence, jumped over:
+//
+//     br.cond.sptk L            // over the cell
+//     <8-byte destination, 8 bytes padding>
+//  L: mov  t0 = ip              // address of this bundle
+//     adds t0 = -16, t0         // &cell
+//     ld8  t0 = [t0]
+//     mov  b6 = t0
+//     br.call.sptk.many b0 = b6
+//
+// Repointing the call is one aligned 8-byte store to the cell -- atomic, and
+// data, so no instruction-cache flush -- which is what lets IC transitions and
+// call resolution patch a call while other threads execute it. The sequence
+// is position-independent: moving the code moves the cell with it, and the
+// destination is absolute. NativeCall recognises exactly this shape.
 void MacroAssembler::far_call(address entry, PredicateRegister qp) {
   assert(entry != nullptr, "far_call to null");
-  movl(t0, entry);
+  assert(qp == pTrue, "IA-64: the cell-form call cannot be predicated");
+  Label over_cell;
+  br(over_cell);
+  emit_int64((int64_t)entry);
+  emit_int64(0);
+  bind(over_cell);
+  mov_from_ip(t0);
+  adds(t0, -(int)BytesPerBundle, t0);
+  Assembler::ld8(t0, t0);
   mov_to_br(btmp, t0);
-  br_call(breturn, btmp, qp);
+  br_call(breturn, btmp);
+}
+
+// far_call with a call relocation (static/opt-virtual/virtual/runtime) at the
+// start of the sequence, where NativeCall and the relocation hooks find it.
+void MacroAssembler::far_call(address entry, const RelocationHolder& rspec) {
+  relocate(rspec);
+  far_call(entry);
+}
+
+int MacroAssembler::ic_check_size() {
+  // adds, ld (receiver klass); adds, ld (speculated klass); cmp, br; far_jump
+  return (6 + 3) * BytesPerBundle;
+}
+
+int MacroAssembler::ic_check(int end_alignment) {
+  Register receiver = j_rarg0;
+  Register data = t1;      // CompiledICData*
+  Register tmp1 = t2;      // scratch: never live at a method entry
+  Register tmp2 = t3;
+  assert(!UseCompactObjectHeaders, "IA-64: compact object headers not yet supported");
+
+  // The UEP of a code blob ensures that the VEP is padded. However, the padding
+  // of the UEP is placed before the inline cache check, so we don't have to
+  // execute any nops when dispatching through the UEP, yet the VEP is aligned
+  // appropriately. That's why we align before the inline cache check here.
+  align(end_alignment, ic_check_size());
+  int uep_offset = offset();
+
+  adds(tmp2, oopDesc::klass_offset_in_bytes(), receiver);
+  if (UseCompressedClassPointers) {
+    Assembler::ld4(tmp1, tmp2);
+    adds(tmp2, in_bytes(CompiledICData::speculated_klass_offset()), data);
+    Assembler::ld4(tmp2, tmp2);
+  } else {
+    Assembler::ld8(tmp1, tmp2);
+    adds(tmp2, in_bytes(CompiledICData::speculated_klass_offset()), data);
+    Assembler::ld8(tmp2, tmp2);
+  }
+  Label ic_hit;
+  beq(tmp1, tmp2, ic_hit);
+  far_jump(SharedRuntime::get_ic_miss_stub());
+  bind(ic_hit);
+
+  assert(offset() - uep_offset == ic_check_size(), "ic_check_size() is wrong");
+  assert((offset() % end_alignment) == 0, "Misaligned verified entry point.");
+  return uep_offset;
+}
+
+// The to-interpreter stub of a static/opt-virtual call (compiledIC_ia64.cpp):
+// movl Rmethod = 0; far_jump(-1). Filled in by set_to_interpreted.
+void MacroAssembler::emit_static_call_stub() {
+  movl(Rmethod, (uint64_t)0);
+  far_jump((address)-1);
+}
+
+int MacroAssembler::static_call_stub_size() {
+  return 4 * BytesPerBundle;    // movl + (movl, mov b6, br)
 }
 
 void MacroAssembler::far_jump(address entry, PredicateRegister qp) {

@@ -770,6 +770,23 @@ inline Insn MovFromIp(uint32_t r1, uint32_t qp = 0) {
   return fOp(0) | fX3(0) | fX6b(0x30) | fR1(r1) | fQp(qp);
 }
 
+// I25: mov r1 = pr. The same format as mov r1 = ip, x6 = 0x33 (SDM vol. 3,
+// 4.3.6.3). PR i lands in bit i of r1 (bit 0, PR 0, is always 1).
+inline Insn MovFromPr(uint32_t r1, uint32_t qp = 0) {
+  return fOp(0) | fX3(0) | fX6b(0x33) | fR1(r1) | fQp(qp);
+}
+
+// I23: mov pr = r2, mask17 (SDM vol. 3, 4.3.6.1). Writes PR i from bit i of r2
+// for the predicates selected by mask17, encoded as
+//   mask17 = sign_ext(s << 16 | mask8c << 8 | mask7a << 1, 17)
+// so bit 0 (PR 0) is never written and bit 16 covers all rotating predicates.
+// mask17 = -1 writes every predicate.
+inline Insn MovToPr(uint32_t r2, int32_t mask17, uint32_t qp = 0) {
+  uint32_t m = (uint32_t)mask17;
+  return fOp(0) | (Insn((m >> 16) & 0x1) << 36) | fX3(3) |
+         (Insn((m >> 8) & 0xff) << 24) | fR2(r2) | (Insn((m >> 1) & 0x7f) << 6) | fQp(qp);
+}
+
 // I3: mux1. Shares the major-7 field layout; the third operand carries the
 // permute-type immediate (MBTYPE4) instead of a register.
 inline Insn Mux1(uint32_t r1, uint32_t r2, uint32_t mbtype4, uint32_t qp = 0) {
