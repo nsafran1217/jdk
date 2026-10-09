@@ -283,7 +283,8 @@ class Assembler : public AbstractAssembler {
 
   // ---- raw bundle emission ------------------------------------------------
 
-  void emit_bundle(ia64::Bundle b) {
+ private:
+  void emit_raw_bundle(ia64::Bundle b) {
     assert(is_aligned(offset(), BytesPerBundle),
            "code position must stay bundle-aligned");
     // Little-endian target, so emitting lo then hi lays the 128-bit bundle out
@@ -292,8 +293,114 @@ class Assembler : public AbstractAssembler {
     emit_int64(b.hi);
   }
 
+ public:
+  // ---- instruction groups: stop elision (BUNDLING.md, Stage 1) -----------
+  //
+  // Every bundle holds one instruction and is emitted with a stop after it.
+  // When the *next* instruction neither reads nor writes a register written
+  // since the last stop, the previous bundle's stop is cleared in place, so the
+  // two share an instruction group and can issue together. Layout never
+  // changes: same sizes, addresses, labels and patch sites.
+  //
+  // The rule is SDM vol. 1 3.4 (1:40-1:43), applied as conservatively as LLVM's
+  // IA64Bundling pass: no RAW or WAW on any register within a group (WAR is
+  // allowed; memory dependencies are allowed in program order). r0, p0, f0 and
+  // f1 are exempt. A qualifying predicate is a read. One special case is used:
+  // a branch may read a predicate written by a non-FP instruction, and a branch
+  // register, from its own group (1:42).
+  //
+  // Anything not described by a Deps -- implicit resources (ar.ccv, ar.unat,
+  // ar.pfs/CFM, alloc, calls, mf, break), raw bundles, movl -- is a barrier:
+  // its stop stays and the group restarts after it. Bundles that code
+  // recognisers or patchers inspect by exact encoding (movl, mov to a branch
+  // register, branches) always keep their own stop; only plain M/I/F bundles
+  // ever lose one. Checked by tools/depcheck.py (as -xexplicit).
+  struct Deps {
+    enum Cls : uint8_t { GR = 0, FR = 1, PR = 2, BR = 3 };
+    uint8_t  nrd = 0, nwr = 0;
+    uint8_t  rd_cls[6], rd_num[6];
+    uint8_t  wr_cls[3], wr_num[3];
+    bool     is_branch = false;   // see the special case above
+    bool     fp_pred   = false;   // writes predicates as an FP instruction
+    bool     keep_stop = false;   // this bundle keeps its own stop
+    Deps& rd(Cls c, int n) { assert(nrd < 6, "deps"); rd_cls[nrd] = c; rd_num[nrd++] = (uint8_t)n; return *this; }
+    Deps& wr(Cls c, int n) { assert(nwr < 3, "deps"); wr_cls[nwr] = c; wr_num[nwr++] = (uint8_t)n; return *this; }
+    Deps& r(Register x)          { return x->encoding() == 0 ? *this : rd(GR, x->encoding()); }
+    Deps& w(Register x)          { return wr(GR, x->encoding()); }
+    Deps& r(FloatRegister x)     { return x->encoding() <= 1 ? *this : rd(FR, x->encoding()); }
+    Deps& w(FloatRegister x)     { return wr(FR, x->encoding()); }
+    Deps& r(PredicateRegister x) { return x.encoding() == 0 ? *this : rd(PR, x.encoding()); }
+    Deps& w(PredicateRegister x) { return x.encoding() == 0 ? *this : wr(PR, x.encoding()); }
+    Deps& r(BranchRegister x)    { return rd(BR, x.encoding()); }
+    Deps& w(BranchRegister x)    { return wr(BR, x.encoding()); }
+    Deps& branch()               { is_branch = true; return *this; }
+    Deps& fp_predicate()         { fp_pred = true; return *this; }
+    Deps& keep()                 { keep_stop = true; return *this; }
+  };
+  static Deps D() { return Deps(); }
+
+ private:
+  uint64_t     _pend[4][2] = {};         // registers written in the open group
+  uint64_t     _pend_fp_pr = 0;          // ... of which predicates by FP insns
+  CodeSection* _last_sect  = nullptr;    // the bundle whose stop may be cleared
+  int          _last_off   = -1;
+
+  bool pending(int c, int n) const { return (_pend[c][n >> 6] >> (n & 63)) & 1; }
+  void clear_pending() { memset(_pend, 0, sizeof(_pend)); _pend_fp_pr = 0; }
+  bool conflicts(const Deps& d) const {
+    for (int i = 0; i < d.nrd; i++) {
+      int c = d.rd_cls[i], n = d.rd_num[i];
+      if (!pending(c, n)) continue;
+      if (d.is_branch && (c == Deps::BR || (c == Deps::PR && !((_pend_fp_pr >> n) & 1)))) continue;
+      return true;                                    // RAW
+    }
+    for (int i = 0; i < d.nwr; i++) {
+      if (pending(d.wr_cls[i], d.wr_num[i])) return true;   // WAW
+    }
+    return false;
+  }
+  void add_pending(const Deps& d) {
+    for (int i = 0; i < d.nwr; i++) {
+      int c = d.wr_cls[i], n = d.wr_num[i];
+      _pend[c][n >> 6] |= (uint64_t)1 << (n & 63);
+      if (c == Deps::PR && d.fp_pred) _pend_fp_pr |= (uint64_t)1 << n;
+    }
+  }
+
+ public:
+  // Emit a bundle. |d| == nullptr makes it a barrier.
+  void emit_bundle(ia64::Bundle b, const Deps* d = nullptr) {
+    if (d != nullptr && UseStopElision &&
+        _last_sect == code_section() && _last_off == offset() - BytesPerBundle &&
+        !conflicts(*d)) {
+      // Join the open group: clear the stop at the end of the previous bundle.
+      address prev = code_section()->start() + _last_off;
+      assert((*prev & 1) == 1, "previous bundle must still end in a stop");
+      *prev &= ~1;
+    } else {
+      clear_pending();
+    }
+    if (d != nullptr) {
+      add_pending(*d);
+    }
+    emit_raw_bundle(b);
+    if (d != nullptr && !d->is_branch && !d->keep_stop) {
+      _last_sect = code_section();
+      _last_off  = offset() - BytesPerBundle;
+    } else {
+      _last_sect = nullptr;               // its stop stays: the next instruction
+      _last_off  = -1;                    // starts a new group
+      clear_pending();
+    }
+  }
+
   // One instruction per bundle, padded with unit-appropriate nops and a
   // trailing stop bit. See the [IA64DOC] comment in assembler_ia64_core.hpp.
+  void emit_m(ia64::Insn i, const Deps& d) { emit_bundle(ia64::BundleM(i), &d); }
+  void emit_i(ia64::Insn i, const Deps& d) { emit_bundle(ia64::BundleI(i), &d); }
+  void emit_f(ia64::Insn i, const Deps& d) { emit_bundle(ia64::BundleF(i), &d); }
+  void emit_b(ia64::Insn i, const Deps& d) { emit_bundle(ia64::BundleB(i), &d); }
+  // Barriers: forms with implicit resources or not yet described.
   void emit_m(ia64::Insn i) { emit_bundle(ia64::BundleM(i)); }
   void emit_i(ia64::Insn i) { emit_bundle(ia64::BundleI(i)); }
   void emit_f(ia64::Insn i) { emit_bundle(ia64::BundleF(i)); }
@@ -313,27 +420,27 @@ class Assembler : public AbstractAssembler {
   // No displacement form exists; the address must already be in a register.
   // IA-64 loads zero-extend: a signed narrow load needs an sxt afterwards.
 
-  void ld1(Register r1, Register r3, QP)  { emit_m(ia64::Ld1(r1->encoding(), r3->encoding(), Q)); }
-  void ld2(Register r1, Register r3, QP)  { emit_m(ia64::Ld2(r1->encoding(), r3->encoding(), Q)); }
-  void ld4(Register r1, Register r3, QP)  { emit_m(ia64::Ld4(r1->encoding(), r3->encoding(), Q)); }
-  void ld8(Register r1, Register r3, QP)  { emit_m(ia64::Ld8(r1->encoding(), r3->encoding(), Q)); }
+  void ld1(Register r1, Register r3, QP)  { emit_m(ia64::Ld1(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  void ld2(Register r1, Register r3, QP)  { emit_m(ia64::Ld2(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  void ld4(Register r1, Register r3, QP)  { emit_m(ia64::Ld4(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  void ld8(Register r1, Register r3, QP)  { emit_m(ia64::Ld8(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
 
-  void st1(Register r3, Register r2, QP)  { emit_m(ia64::St1(r3->encoding(), r2->encoding(), Q)); }
-  void st2(Register r3, Register r2, QP)  { emit_m(ia64::St2(r3->encoding(), r2->encoding(), Q)); }
-  void st4(Register r3, Register r2, QP)  { emit_m(ia64::St4(r3->encoding(), r2->encoding(), Q)); }
-  void st8(Register r3, Register r2, QP)  { emit_m(ia64::St8(r3->encoding(), r2->encoding(), Q)); }
+  void st1(Register r3, Register r2, QP)  { emit_m(ia64::St1(r3->encoding(), r2->encoding(), Q), D().r(r3).r(r2).r(qp)); }
+  void st2(Register r3, Register r2, QP)  { emit_m(ia64::St2(r3->encoding(), r2->encoding(), Q), D().r(r3).r(r2).r(qp)); }
+  void st4(Register r3, Register r2, QP)  { emit_m(ia64::St4(r3->encoding(), r2->encoding(), Q), D().r(r3).r(r2).r(qp)); }
+  void st8(Register r3, Register r2, QP)  { emit_m(ia64::St8(r3->encoding(), r2->encoding(), Q), D().r(r3).r(r2).r(qp)); }
 
   // Post-increment: access [r3], then r3 += imm9 (signed 9 bits). The one
   // addressing mode beyond a bare register; it is how the expression stack is
   // pushed and popped without a separate adds.
-  void ld1_inc(Register r1, Register r3, int imm9, QP) { assert(ia64::is_simm9(imm9), "imm9"); emit_m(ia64::Ld1Inc(r1->encoding(), r3->encoding(), imm9, Q)); }
-  void ld2_inc(Register r1, Register r3, int imm9, QP) { assert(ia64::is_simm9(imm9), "imm9"); emit_m(ia64::Ld2Inc(r1->encoding(), r3->encoding(), imm9, Q)); }
-  void ld4_inc(Register r1, Register r3, int imm9, QP) { assert(ia64::is_simm9(imm9), "imm9"); emit_m(ia64::Ld4Inc(r1->encoding(), r3->encoding(), imm9, Q)); }
-  void ld8_inc(Register r1, Register r3, int imm9, QP) { assert(ia64::is_simm9(imm9), "imm9"); emit_m(ia64::Ld8Inc(r1->encoding(), r3->encoding(), imm9, Q)); }
-  void st1_inc(Register r3, Register r2, int imm9, QP) { assert(ia64::is_simm9(imm9), "imm9"); emit_m(ia64::St1Inc(r3->encoding(), r2->encoding(), imm9, Q)); }
-  void st2_inc(Register r3, Register r2, int imm9, QP) { assert(ia64::is_simm9(imm9), "imm9"); emit_m(ia64::St2Inc(r3->encoding(), r2->encoding(), imm9, Q)); }
-  void st4_inc(Register r3, Register r2, int imm9, QP) { assert(ia64::is_simm9(imm9), "imm9"); emit_m(ia64::St4Inc(r3->encoding(), r2->encoding(), imm9, Q)); }
-  void st8_inc(Register r3, Register r2, int imm9, QP) { assert(ia64::is_simm9(imm9), "imm9"); emit_m(ia64::St8Inc(r3->encoding(), r2->encoding(), imm9, Q)); }
+  void ld1_inc(Register r1, Register r3, int imm9, QP) { assert(ia64::is_simm9(imm9), "imm9"); emit_m(ia64::Ld1Inc(r1->encoding(), r3->encoding(), imm9, Q), D().w(r1).w(r3).r(r3).r(qp)); }
+  void ld2_inc(Register r1, Register r3, int imm9, QP) { assert(ia64::is_simm9(imm9), "imm9"); emit_m(ia64::Ld2Inc(r1->encoding(), r3->encoding(), imm9, Q), D().w(r1).w(r3).r(r3).r(qp)); }
+  void ld4_inc(Register r1, Register r3, int imm9, QP) { assert(ia64::is_simm9(imm9), "imm9"); emit_m(ia64::Ld4Inc(r1->encoding(), r3->encoding(), imm9, Q), D().w(r1).w(r3).r(r3).r(qp)); }
+  void ld8_inc(Register r1, Register r3, int imm9, QP) { assert(ia64::is_simm9(imm9), "imm9"); emit_m(ia64::Ld8Inc(r1->encoding(), r3->encoding(), imm9, Q), D().w(r1).w(r3).r(r3).r(qp)); }
+  void st1_inc(Register r3, Register r2, int imm9, QP) { assert(ia64::is_simm9(imm9), "imm9"); emit_m(ia64::St1Inc(r3->encoding(), r2->encoding(), imm9, Q), D().w(r3).r(r3).r(r2).r(qp)); }
+  void st2_inc(Register r3, Register r2, int imm9, QP) { assert(ia64::is_simm9(imm9), "imm9"); emit_m(ia64::St2Inc(r3->encoding(), r2->encoding(), imm9, Q), D().w(r3).r(r3).r(r2).r(qp)); }
+  void st4_inc(Register r3, Register r2, int imm9, QP) { assert(ia64::is_simm9(imm9), "imm9"); emit_m(ia64::St4Inc(r3->encoding(), r2->encoding(), imm9, Q), D().w(r3).r(r3).r(r2).r(qp)); }
+  void st8_inc(Register r3, Register r2, int imm9, QP) { assert(ia64::is_simm9(imm9), "imm9"); emit_m(ia64::St8Inc(r3->encoding(), r2->encoding(), imm9, Q), D().w(r3).r(r3).r(r2).r(qp)); }
 
   void ld4_acq(Register r1, Register r3, QP) { emit_m(ia64::Ld4Acq(r1->encoding(), r3->encoding(), Q)); }
   void ld8_acq(Register r1, Register r3, QP) { emit_m(ia64::Ld8Acq(r1->encoding(), r3->encoding(), Q)); }
@@ -346,10 +453,10 @@ class Assembler : public AbstractAssembler {
   void ld8_fill(Register r1, Register r3, QP)  { emit_m(ia64::Ld8Fill(r1->encoding(), r3->encoding(), Q)); }
   void st8_spill(Register r3, Register r2, QP) { emit_m(ia64::St8Spill(r3->encoding(), r2->encoding(), Q)); }
 
-  void ldfs(FloatRegister f1, Register r3, QP) { emit_m(ia64::Ldfs(f1->encoding(), r3->encoding(), Q)); }
-  void ldfd(FloatRegister f1, Register r3, QP) { emit_m(ia64::Ldfd(f1->encoding(), r3->encoding(), Q)); }
-  void stfs(Register r3, FloatRegister f2, QP) { emit_m(ia64::Stfs(r3->encoding(), f2->encoding(), Q)); }
-  void stfd(Register r3, FloatRegister f2, QP) { emit_m(ia64::Stfd(r3->encoding(), f2->encoding(), Q)); }
+  void ldfs(FloatRegister f1, Register r3, QP) { emit_m(ia64::Ldfs(f1->encoding(), r3->encoding(), Q), D().w(f1).r(r3).r(qp)); }
+  void ldfd(FloatRegister f1, Register r3, QP) { emit_m(ia64::Ldfd(f1->encoding(), r3->encoding(), Q), D().w(f1).r(r3).r(qp)); }
+  void stfs(Register r3, FloatRegister f2, QP) { emit_m(ia64::Stfs(r3->encoding(), f2->encoding(), Q), D().r(r3).r(f2).r(qp)); }
+  void stfd(Register r3, FloatRegister f2, QP) { emit_m(ia64::Stfd(r3->encoding(), f2->encoding(), Q), D().r(r3).r(f2).r(qp)); }
 
   // Full 82-bit FP save/restore, 16 bytes and 16-byte aligned. Required for
   // f2-f5 and f16-f31 in call_stub: a double round-trip would silently
@@ -359,32 +466,32 @@ class Assembler : public AbstractAssembler {
 
   // ---- ALU (A unit, issued on M here since we pad to MII) ----------------
 
-  void add(Register r1, Register r2, Register r3, QP)   { emit_m(ia64::Add(r1->encoding(), r2->encoding(), r3->encoding(), Q)); }
-  void sub(Register r1, Register r2, Register r3, QP)   { emit_m(ia64::Sub(r1->encoding(), r2->encoding(), r3->encoding(), Q)); }
-  void and_(Register r1, Register r2, Register r3, QP)  { emit_m(ia64::And(r1->encoding(), r2->encoding(), r3->encoding(), Q)); }
-  void andcm(Register r1, Register r2, Register r3, QP) { emit_m(ia64::Andcm(r1->encoding(), r2->encoding(), r3->encoding(), Q)); }
-  void or_(Register r1, Register r2, Register r3, QP)   { emit_m(ia64::Or(r1->encoding(), r2->encoding(), r3->encoding(), Q)); }
-  void xor_(Register r1, Register r2, Register r3, QP)  { emit_m(ia64::Xor(r1->encoding(), r2->encoding(), r3->encoding(), Q)); }
+  void add(Register r1, Register r2, Register r3, QP)   { emit_m(ia64::Add(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
+  void sub(Register r1, Register r2, Register r3, QP)   { emit_m(ia64::Sub(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
+  void and_(Register r1, Register r2, Register r3, QP)  { emit_m(ia64::And(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
+  void andcm(Register r1, Register r2, Register r3, QP) { emit_m(ia64::Andcm(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
+  void or_(Register r1, Register r2, Register r3, QP)   { emit_m(ia64::Or(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
+  void xor_(Register r1, Register r2, Register r3, QP)  { emit_m(ia64::Xor(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
 
   // The 8-bit immediate forms. Note the immediate is the FIRST source:
   // sub_imm(r1, imm8, r3) computes imm8 - r3 (so negation is sub_imm(r1, 0, r3)).
-  void and_imm(Register r1, int64_t imm8, Register r3, QP) { assert(ia64::is_simm8(imm8), "imm8"); emit_m(ia64::AndImm(r1->encoding(), imm8, r3->encoding(), Q)); }
-  void or_imm(Register r1, int64_t imm8, Register r3, QP)  { assert(ia64::is_simm8(imm8), "imm8"); emit_m(ia64::OrImm(r1->encoding(), imm8, r3->encoding(), Q)); }
-  void xor_imm(Register r1, int64_t imm8, Register r3, QP) { assert(ia64::is_simm8(imm8), "imm8"); emit_m(ia64::XorImm(r1->encoding(), imm8, r3->encoding(), Q)); }
-  void sub_imm(Register r1, int64_t imm8, Register r3, QP) { assert(ia64::is_simm8(imm8), "imm8"); emit_m(ia64::SubImm(r1->encoding(), imm8, r3->encoding(), Q)); }
+  void and_imm(Register r1, int64_t imm8, Register r3, QP) { assert(ia64::is_simm8(imm8), "imm8"); emit_m(ia64::AndImm(r1->encoding(), imm8, r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  void or_imm(Register r1, int64_t imm8, Register r3, QP)  { assert(ia64::is_simm8(imm8), "imm8"); emit_m(ia64::OrImm(r1->encoding(), imm8, r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  void xor_imm(Register r1, int64_t imm8, Register r3, QP) { assert(ia64::is_simm8(imm8), "imm8"); emit_m(ia64::XorImm(r1->encoding(), imm8, r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  void sub_imm(Register r1, int64_t imm8, Register r3, QP) { assert(ia64::is_simm8(imm8), "imm8"); emit_m(ia64::SubImm(r1->encoding(), imm8, r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
 
   // r1 = (r2 << count) + r3, count 1..4: base + index * scale in one step.
   void shladd(Register r1, Register r2, int count, Register r3, QP) {
-    emit_m(ia64::Shladd(r1->encoding(), r2->encoding(), count, r3->encoding(), Q));
+    emit_m(ia64::Shladd(r1->encoding(), r2->encoding(), count, r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp));
   }
 
   // adds is also the register move (imm == 0) and the only way to add a small
   // constant; anything wider than 14 bits signed needs movl + add.
   void adds(Register r1, int64_t imm14, Register r3, QP) {
     assert(ia64::is_simm14(imm14), "immediate too wide for adds -- use movl + add");
-    emit_m(ia64::Adds(r1->encoding(), imm14, r3->encoding(), Q));
+    emit_m(ia64::Adds(r1->encoding(), imm14, r3->encoding(), Q), D().w(r1).r(r3).r(qp));
   }
-  void mov(Register r1, Register r3, QP) { emit_m(ia64::MovReg(r1->encoding(), r3->encoding(), Q)); }
+  void mov(Register r1, Register r3, QP) { emit_m(ia64::MovReg(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
 
   // ---- compare (A unit) --------------------------------------------------
   //
@@ -393,20 +500,20 @@ class Assembler : public AbstractAssembler {
   // int comparisons want. The immediate forms take the 8-bit immediate as the
   // FIRST operand: cmp_lt_imm(p1, p2, 5, r) tests 5 < r.
 
-  void cmp_eq(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::CmpEq(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q)); }
-  void cmp_ne(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::CmpNe(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q)); }
-  void cmp_lt(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::CmpLt(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q)); }
-  void cmp_ltu(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP) { emit_m(ia64::CmpLtu(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q)); }
+  void cmp_eq(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::CmpEq(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
+  void cmp_ne(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::CmpNe(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
+  void cmp_lt(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::CmpLt(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
+  void cmp_ltu(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP) { emit_m(ia64::CmpLtu(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
 
-  void cmp4_eq(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::Cmp4Eq(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q)); }
-  void cmp4_ne(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::Cmp4Ne(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q)); }
-  void cmp4_lt(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::Cmp4Lt(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q)); }
-  void cmp4_ltu(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP) { emit_m(ia64::Cmp4Ltu(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q)); }
+  void cmp4_eq(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::Cmp4Eq(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
+  void cmp4_ne(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::Cmp4Ne(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
+  void cmp4_lt(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_m(ia64::Cmp4Lt(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
+  void cmp4_ltu(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP) { emit_m(ia64::Cmp4Ltu(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r(r2).r(r3).r(qp)); }
 
 #define CMP_IMM(name, Enc) \
   void name(PredicateRegister p1, PredicateRegister p2, int64_t imm8, Register r3, QP) { \
     assert(ia64::is_simm8(imm8), "imm8"); \
-    emit_m(ia64::Enc(p1.encoding(), p2.encoding(), imm8, r3->encoding(), Q)); \
+    emit_m(ia64::Enc(p1.encoding(), p2.encoding(), imm8, r3->encoding(), Q), D().w(p1).w(p2).r(r3).r(qp)); \
   }
   CMP_IMM(cmp_eq_imm,   CmpEqImm)
   CMP_IMM(cmp_ne_imm,   CmpNeImm)
@@ -419,31 +526,31 @@ class Assembler : public AbstractAssembler {
 #undef CMP_IMM
 
   // p1 = (bit pos of r3 is clear) / (is set); p2 the complement.
-  void tbit_z(PredicateRegister p1, PredicateRegister p2, Register r3, int pos, QP)  { emit_i(ia64::TbitZ(p1.encoding(), p2.encoding(), r3->encoding(), pos, Q)); }
-  void tbit_nz(PredicateRegister p1, PredicateRegister p2, Register r3, int pos, QP) { emit_i(ia64::TbitNz(p1.encoding(), p2.encoding(), r3->encoding(), pos, Q)); }
+  void tbit_z(PredicateRegister p1, PredicateRegister p2, Register r3, int pos, QP)  { emit_i(ia64::TbitZ(p1.encoding(), p2.encoding(), r3->encoding(), pos, Q), D().w(p1).w(p2).r(r3).r(qp)); }
+  void tbit_nz(PredicateRegister p1, PredicateRegister p2, Register r3, int pos, QP) { emit_i(ia64::TbitNz(p1.encoding(), p2.encoding(), r3->encoding(), pos, Q), D().w(p1).w(p2).r(r3).r(qp)); }
 
   // ---- shifts, extends (I unit) ------------------------------------------
 
-  void shl(Register r1, Register value, Register count, QP)  { emit_i(ia64::Shl(r1->encoding(), value->encoding(), count->encoding(), Q)); }
-  void shr(Register r1, Register value, Register count, QP)  { emit_i(ia64::Shr(r1->encoding(), value->encoding(), count->encoding(), Q)); }
-  void shru(Register r1, Register value, Register count, QP) { emit_i(ia64::ShrU(r1->encoding(), value->encoding(), count->encoding(), Q)); }
+  void shl(Register r1, Register value, Register count, QP)  { emit_i(ia64::Shl(r1->encoding(), value->encoding(), count->encoding(), Q), D().w(r1).r(value).r(count).r(qp)); }
+  void shr(Register r1, Register value, Register count, QP)  { emit_i(ia64::Shr(r1->encoding(), value->encoding(), count->encoding(), Q), D().w(r1).r(value).r(count).r(qp)); }
+  void shru(Register r1, Register value, Register count, QP) { emit_i(ia64::ShrU(r1->encoding(), value->encoding(), count->encoding(), Q), D().w(r1).r(value).r(count).r(qp)); }
 
-  void shl_imm(Register r1, Register r2, uint32_t count, QP)  { emit_i(ia64::ShlImm(r1->encoding(), r2->encoding(), count, Q)); }
-  void shr_imm(Register r1, Register r3, uint32_t count, QP)  { emit_i(ia64::ShrImm(r1->encoding(), r3->encoding(), count, Q)); }
-  void shru_imm(Register r1, Register r3, uint32_t count, QP) { emit_i(ia64::ShrUImm(r1->encoding(), r3->encoding(), count, Q)); }
+  void shl_imm(Register r1, Register r2, uint32_t count, QP)  { emit_i(ia64::ShlImm(r1->encoding(), r2->encoding(), count, Q), D().w(r1).r(r2).r(qp)); }
+  void shr_imm(Register r1, Register r3, uint32_t count, QP)  { emit_i(ia64::ShrImm(r1->encoding(), r3->encoding(), count, Q), D().w(r1).r(r3).r(qp)); }
+  void shru_imm(Register r1, Register r3, uint32_t count, QP) { emit_i(ia64::ShrUImm(r1->encoding(), r3->encoding(), count, Q), D().w(r1).r(r3).r(qp)); }
 
-  void extr_u(Register r1, Register r3, uint32_t pos, uint32_t len, QP) { emit_i(ia64::ExtrU(r1->encoding(), r3->encoding(), pos, len, Q)); }
-  void extr(Register r1, Register r3, uint32_t pos, uint32_t len, QP)   { emit_i(ia64::Extr(r1->encoding(), r3->encoding(), pos, len, Q)); }
-  void dep_z(Register r1, Register r2, uint32_t pos, uint32_t len, QP)  { emit_i(ia64::DepZ(r1->encoding(), r2->encoding(), pos, len, Q)); }
+  void extr_u(Register r1, Register r3, uint32_t pos, uint32_t len, QP) { emit_i(ia64::ExtrU(r1->encoding(), r3->encoding(), pos, len, Q), D().w(r1).r(r3).r(qp)); }
+  void extr(Register r1, Register r3, uint32_t pos, uint32_t len, QP)   { emit_i(ia64::Extr(r1->encoding(), r3->encoding(), pos, len, Q), D().w(r1).r(r3).r(qp)); }
+  void dep_z(Register r1, Register r2, uint32_t pos, uint32_t len, QP)  { emit_i(ia64::DepZ(r1->encoding(), r2->encoding(), pos, len, Q), D().w(r1).r(r2).r(qp)); }
 
-  void sxt1(Register r1, Register r3, QP) { emit_i(ia64::Sxt1(r1->encoding(), r3->encoding(), Q)); }
-  void sxt2(Register r1, Register r3, QP) { emit_i(ia64::Sxt2(r1->encoding(), r3->encoding(), Q)); }
-  void sxt4(Register r1, Register r3, QP) { emit_i(ia64::Sxt4(r1->encoding(), r3->encoding(), Q)); }
-  void zxt1(Register r1, Register r3, QP) { emit_i(ia64::Zxt1(r1->encoding(), r3->encoding(), Q)); }
-  void zxt2(Register r1, Register r3, QP) { emit_i(ia64::Zxt2(r1->encoding(), r3->encoding(), Q)); }
-  void zxt4(Register r1, Register r3, QP) { emit_i(ia64::Zxt4(r1->encoding(), r3->encoding(), Q)); }
+  void sxt1(Register r1, Register r3, QP) { emit_i(ia64::Sxt1(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  void sxt2(Register r1, Register r3, QP) { emit_i(ia64::Sxt2(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  void sxt4(Register r1, Register r3, QP) { emit_i(ia64::Sxt4(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  void zxt1(Register r1, Register r3, QP) { emit_i(ia64::Zxt1(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  void zxt2(Register r1, Register r3, QP) { emit_i(ia64::Zxt2(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  void zxt4(Register r1, Register r3, QP) { emit_i(ia64::Zxt4(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
 
-  void popcnt(Register r1, Register r3, QP) { emit_i(ia64::Popcnt(r1->encoding(), r3->encoding(), Q)); }
+  void popcnt(Register r1, Register r3, QP) { emit_i(ia64::Popcnt(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
 
   // r1 = address of the bundle holding this instruction.
   void mov_from_ip(Register r1, QP) { emit_i(ia64::MovFromIp(r1->encoding(), Q)); }
@@ -482,9 +589,9 @@ class Assembler : public AbstractAssembler {
 
   void mov_to_br(BranchRegister b1, Register r2, QP)   {
     if (b1 == b7) _branch_reg_epoch++;
-    emit_i(ia64::MovToBr(b1.encoding(), r2->encoding(), Q));
+    emit_i(ia64::MovToBr(b1.encoding(), r2->encoding(), Q), D().w(b1).r(r2).r(qp).keep());
   }
-  void mov_from_br(Register r1, BranchRegister b2, QP) { emit_i(ia64::MovFromBr(r1->encoding(), b2.encoding(), Q)); }
+  void mov_from_br(Register r1, BranchRegister b2, QP) { emit_i(ia64::MovFromBr(r1->encoding(), b2.encoding(), Q), D().w(r1).r(b2).r(qp)); }
 
   // The one and only alloc, in StubRoutines::call_stub(). See FRAME-DESIGN.md
   // section 1: a second one anywhere invalidates the CFM invariant that makes
@@ -493,7 +600,7 @@ class Assembler : public AbstractAssembler {
 
   // ---- branches (B unit) --------------------------------------------------
 
-  void br_cond(BranchRegister b2, QP)                    { emit_b(ia64::BrCond(b2.encoding(), Q)); }
+  void br_cond(BranchRegister b2, QP)                    { emit_b(ia64::BrCond(b2.encoding(), Q), D().r(b2).r(qp).branch()); }
   void br_ret(BranchRegister b2 = breturn, QP)           { emit_b(ia64::BrRet(b2.encoding(), Q)); }
   void br_call(BranchRegister b1, BranchRegister b2, QP) { _branch_reg_epoch++; emit_b(ia64::BrCall(b1.encoding(), b2.encoding(), Q)); }
 
@@ -502,7 +609,7 @@ class Assembler : public AbstractAssembler {
   // call into another blob, a stub) goes through a branch register instead.
   void br_cond(Label& L, QP) {
     address dest = target(L);
-    emit_b(ia64::BrCondRel(bundle_disp(dest), Q));
+    emit_b(ia64::BrCondRel(bundle_disp(dest), Q), D().r(qp).branch());
   }
   void br_call(BranchRegister b1, Label& L, QP) {
     _branch_reg_epoch++;
@@ -518,7 +625,7 @@ class Assembler : public AbstractAssembler {
   //
   // The port has no gp-relative addressing, and IP-relative branches reach
   // only +/-16 MiB, so every absolute address is materialised here.
-  void movl(Register r1, uint64_t imm, QP) { emit_bundle(ia64::MovlBundle(r1->encoding(), imm, Q)); }
+  void movl(Register r1, uint64_t imm, QP) { Deps d = D().w(r1).r(qp).keep(); emit_bundle(ia64::MovlBundle(r1->encoding(), imm, Q), &d); }
   void movl(Register r1, address a, QP)    { movl(r1, (uint64_t)(uintptr_t)a, qp); }
 
   // Load the address of a label, position-independently:
@@ -533,24 +640,24 @@ class Assembler : public AbstractAssembler {
   // ---- floating point (F unit) -------------------------------------------
 
   void fma_d(FloatRegister f1, FloatRegister f3, FloatRegister f4, FloatRegister f2, QP) {
-    emit_f(ia64::FmaD(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), ia64::sf0, Q));
+    emit_f(ia64::FmaD(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), ia64::sf0, Q), D().w(f1).r(f3).r(f4).r(f2).r(qp));
   }
-  void fadd_d(FloatRegister f1, FloatRegister f3, FloatRegister f2, QP) { emit_f(ia64::FaddD(f1->encoding(), f3->encoding(), f2->encoding(), ia64::sf0, Q)); }
-  void fsub_d(FloatRegister f1, FloatRegister f3, FloatRegister f2, QP) { emit_f(ia64::FsubD(f1->encoding(), f3->encoding(), f2->encoding(), ia64::sf0, Q)); }
-  void fmpy_d(FloatRegister f1, FloatRegister f3, FloatRegister f4, QP) { emit_f(ia64::FmpyD(f1->encoding(), f3->encoding(), f4->encoding(), ia64::sf0, Q)); }
+  void fadd_d(FloatRegister f1, FloatRegister f3, FloatRegister f2, QP) { emit_f(ia64::FaddD(f1->encoding(), f3->encoding(), f2->encoding(), ia64::sf0, Q), D().w(f1).r(f3).r(f2).r(qp)); }
+  void fsub_d(FloatRegister f1, FloatRegister f3, FloatRegister f2, QP) { emit_f(ia64::FsubD(f1->encoding(), f3->encoding(), f2->encoding(), ia64::sf0, Q), D().w(f1).r(f3).r(f2).r(qp)); }
+  void fmpy_d(FloatRegister f1, FloatRegister f3, FloatRegister f4, QP) { emit_f(ia64::FmpyD(f1->encoding(), f3->encoding(), f4->encoding(), ia64::sf0, Q), D().w(f1).r(f3).r(f4).r(qp)); }
   // f1 = f3, an exact copy of the 82-bit register (fmerge.s f1 = f3, f3; GNU
   // as's "mov f1 = f3"). Not fnorm: normalising to double format would turn a
   // float denormal's register image into a normal value with an exponent below
   // the single range, which stfs then packs wrongly (exponent off by 2^128).
-  void fmov(FloatRegister f1, FloatRegister f3, QP)                     { emit_f(ia64::FmergeS(f1->encoding(), f3->encoding(), f3->encoding(), Q)); }
+  void fmov(FloatRegister f1, FloatRegister f3, QP)                     { emit_f(ia64::FmergeS(f1->encoding(), f3->encoding(), f3->encoding(), Q), D().w(f1).r(f3).r(qp)); }
 
   // Single precision rounds to IEEE single (the .s completer): Java float
   // arithmetic needs it on every operation, since registers are 82 bits.
-  void fadd_s(FloatRegister f1, FloatRegister f3, FloatRegister f2, QP) { emit_f(ia64::FaddS(f1->encoding(), f3->encoding(), f2->encoding(), ia64::sf0, Q)); }
-  void fsub_s(FloatRegister f1, FloatRegister f3, FloatRegister f2, QP) { emit_f(ia64::FsubS(f1->encoding(), f3->encoding(), f2->encoding(), ia64::sf0, Q)); }
-  void fmpy_s(FloatRegister f1, FloatRegister f3, FloatRegister f4, QP) { emit_f(ia64::FmpyS(f1->encoding(), f3->encoding(), f4->encoding(), ia64::sf0, Q)); }
-  void fnorm_s(FloatRegister f1, FloatRegister f3, QP)                  { emit_f(ia64::FnormS(f1->encoding(), f3->encoding(), ia64::sf0, Q)); }
-  void fnorm_d(FloatRegister f1, FloatRegister f3, QP)                  { emit_f(ia64::FnormD(f1->encoding(), f3->encoding(), ia64::sf0, Q)); }
+  void fadd_s(FloatRegister f1, FloatRegister f3, FloatRegister f2, QP) { emit_f(ia64::FaddS(f1->encoding(), f3->encoding(), f2->encoding(), ia64::sf0, Q), D().w(f1).r(f3).r(f2).r(qp)); }
+  void fsub_s(FloatRegister f1, FloatRegister f3, FloatRegister f2, QP) { emit_f(ia64::FsubS(f1->encoding(), f3->encoding(), f2->encoding(), ia64::sf0, Q), D().w(f1).r(f3).r(f2).r(qp)); }
+  void fmpy_s(FloatRegister f1, FloatRegister f3, FloatRegister f4, QP) { emit_f(ia64::FmpyS(f1->encoding(), f3->encoding(), f4->encoding(), ia64::sf0, Q), D().w(f1).r(f3).r(f4).r(qp)); }
+  void fnorm_s(FloatRegister f1, FloatRegister f3, QP)                  { emit_f(ia64::FnormS(f1->encoding(), f3->encoding(), ia64::sf0, Q), D().w(f1).r(f3).r(qp)); }
+  void fnorm_d(FloatRegister f1, FloatRegister f3, QP)                  { emit_f(ia64::FnormD(f1->encoding(), f3->encoding(), ia64::sf0, Q), D().w(f1).r(f3).r(qp)); }
   // Explicit-status-field forms, for multi-step sequences (the inline divide)
   // whose intermediate steps run on sf1. Linux starts every process with sf1
   // set to widest-range exponent, extended precision, round-to-nearest and
@@ -558,16 +665,16 @@ class Assembler : public AbstractAssembler {
   // published IA-64 division algorithms assume. fma / fnma round to the
   // status field's precision (extended); fma_s / fma_d to IEEE single/double.
   void fma(FloatRegister f1, FloatRegister f3, FloatRegister f4, FloatRegister f2, ia64::FpSf sf, QP) {
-    emit_f(ia64::Fma(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), sf, Q));
+    emit_f(ia64::Fma(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), sf, Q), D().w(f1).r(f3).r(f4).r(f2).r(qp));
   }
   void fnma(FloatRegister f1, FloatRegister f3, FloatRegister f4, FloatRegister f2, ia64::FpSf sf, QP) {
-    emit_f(ia64::Fnma(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), sf, Q));
+    emit_f(ia64::Fnma(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), sf, Q), D().w(f1).r(f3).r(f4).r(f2).r(qp));
   }
   void fma_s(FloatRegister f1, FloatRegister f3, FloatRegister f4, FloatRegister f2, ia64::FpSf sf, QP) {
-    emit_f(ia64::FmaS(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), sf, Q));
+    emit_f(ia64::FmaS(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), sf, Q), D().w(f1).r(f3).r(f4).r(f2).r(qp));
   }
   void fma_d(FloatRegister f1, FloatRegister f3, FloatRegister f4, FloatRegister f2, ia64::FpSf sf, QP) {
-    emit_f(ia64::FmaD(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), sf, Q));
+    emit_f(ia64::FmaD(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), sf, Q), D().w(f1).r(f3).r(f4).r(f2).r(qp));
   }
   // f1 ~= f2 / f3 (a reciprocal approximation of f3, scaled), p2 = whether the
   // software Newton-Raphson sequence must refine it. p2 is cleared when f1 is
@@ -575,32 +682,32 @@ class Assembler : public AbstractAssembler {
   // kernel's floating-point software assist completes), so every refinement
   // step is predicated on p2.
   void frcpa(FloatRegister f1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP) {
-    emit_f(ia64::Frcpa(f1->encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q));
+    emit_f(ia64::Frcpa(f1->encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().w(f1).w(p2).r(f2).r(f3).r(qp).fp_predicate());
   }
   // f1 = f3 with its sign inverted: exact, and NaN-preserving.
-  void fneg(FloatRegister f1, FloatRegister f3, QP)                     { emit_f(ia64::FmergeNs(f1->encoding(), f3->encoding(), f3->encoding(), Q)); }
+  void fneg(FloatRegister f1, FloatRegister f3, QP)                     { emit_f(ia64::FmergeNs(f1->encoding(), f3->encoding(), f3->encoding(), Q), D().w(f1).r(f3).r(qp)); }
   // f1 = the 64-bit signed integer in f2's significand, as a floating value
   // (exact in register format; round with fnorm_s / fnorm_d after).
-  void fcvt_xf(FloatRegister f1, FloatRegister f2, QP)                  { emit_f(ia64::FcvtXf(f1->encoding(), f2->encoding(), Q)); }
+  void fcvt_xf(FloatRegister f1, FloatRegister f2, QP)                  { emit_f(ia64::FcvtXf(f1->encoding(), f2->encoding(), Q), D().w(f1).r(f2).r(qp)); }
   // p1 = relation, p2 = !relation; an unordered operand makes eq/lt/le false.
-  void fcmp_eq(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpEq(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q)); }
-  void fcmp_lt(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpLt(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q)); }
-  void fcmp_unord(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP) { emit_f(ia64::FcmpUnord(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q)); }
+  void fcmp_eq(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpEq(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().w(p1).w(p2).r(f2).r(f3).r(qp).fp_predicate()); }
+  void fcmp_lt(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpLt(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().w(p1).w(p2).r(f2).r(f3).r(qp).fp_predicate()); }
+  void fcmp_unord(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP) { emit_f(ia64::FcmpUnord(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().w(p1).w(p2).r(f2).r(f3).r(qp).fp_predicate()); }
 
   // r1 = r2 with its eight bytes reversed.
-  void mux1_rev(Register r1, Register r2, QP) { emit_i(ia64::Mux1(r1->encoding(), r2->encoding(), ia64::kMux1Rev, Q)); }
+  void mux1_rev(Register r1, Register r2, QP) { emit_i(ia64::Mux1(r1->encoding(), r2->encoding(), ia64::kMux1Rev, Q), D().w(r1).r(r2).r(qp)); }
 
-  void getf_d(Register r1, FloatRegister f2, QP)   { emit_m(ia64::GetfD(r1->encoding(), f2->encoding(), Q)); }
-  void setf_d(FloatRegister f1, Register r2, QP)   { emit_m(ia64::SetfD(f1->encoding(), r2->encoding(), Q)); }
-  void getf_s(Register r1, FloatRegister f2, QP)   { emit_m(ia64::GetfS(r1->encoding(), f2->encoding(), Q)); }
-  void setf_s(FloatRegister f1, Register r2, QP)   { emit_m(ia64::SetfS(f1->encoding(), r2->encoding(), Q)); }
-  void getf_sig(Register r1, FloatRegister f2, QP) { emit_m(ia64::GetfSig(r1->encoding(), f2->encoding(), Q)); }
-  void setf_sig(FloatRegister f1, Register r2, QP) { emit_m(ia64::SetfSig(f1->encoding(), r2->encoding(), Q)); }
+  void getf_d(Register r1, FloatRegister f2, QP)   { emit_m(ia64::GetfD(r1->encoding(), f2->encoding(), Q), D().w(r1).r(f2).r(qp)); }
+  void setf_d(FloatRegister f1, Register r2, QP)   { emit_m(ia64::SetfD(f1->encoding(), r2->encoding(), Q), D().w(f1).r(r2).r(qp)); }
+  void getf_s(Register r1, FloatRegister f2, QP)   { emit_m(ia64::GetfS(r1->encoding(), f2->encoding(), Q), D().w(r1).r(f2).r(qp)); }
+  void setf_s(FloatRegister f1, Register r2, QP)   { emit_m(ia64::SetfS(f1->encoding(), r2->encoding(), Q), D().w(f1).r(r2).r(qp)); }
+  void getf_sig(Register r1, FloatRegister f2, QP) { emit_m(ia64::GetfSig(r1->encoding(), f2->encoding(), Q), D().w(r1).r(f2).r(qp)); }
+  void setf_sig(FloatRegister f1, Register r2, QP) { emit_m(ia64::SetfSig(f1->encoding(), r2->encoding(), Q), D().w(f1).r(r2).r(qp)); }
 
   // Integer multiply goes through the FP significand path: the integer units
   // have no multiplier.
   void xma_l(FloatRegister f1, FloatRegister f3, FloatRegister f4, FloatRegister f2, QP) {
-    emit_f(ia64::XmaL(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), Q));
+    emit_f(ia64::XmaL(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), Q), D().w(f1).r(f3).r(f4).r(f2).r(qp));
   }
 
 #undef QP

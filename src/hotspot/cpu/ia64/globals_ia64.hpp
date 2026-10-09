@@ -120,6 +120,10 @@ define_pd_global(intx, InlineSmallCode, 1000);
           range(wordSize, max_jint)                                              \
                                                                                  \
   product(bool, TraceTraps, false, DIAGNOSTIC,                                   \
-          "Trace all traps the signal handler")
+          "Trace all traps the signal handler")                                 \
+                                                                                 \
+  product(bool, UseStopElision, true, DIAGNOSTIC,                                \
+          "Let independent consecutive instructions share an instruction "      \
+          "group by omitting the stop between them (BUNDLING.md, Stage 1)")
 
 #endif // CPU_IA64_GLOBALS_IA64_HPP
