@@ -639,9 +639,630 @@ static void gen_special_dispatch(MacroAssembler* masm,
                                                  receiver_reg, member_reg, /*for_compiler_entry:*/ true);
 }
 
-// Native wrappers are nmethods. Real native methods stay interpreted for now
-// (PreferInterpreterNativeStubs, set in VM_Version::initialize; FRAME-DESIGN.md
-// 11.5); the method-handle intrinsics are generated here.
+// ---------------------------------------------------------------------------
+// JNI native wrappers (after riscv). The wrapper is called with the compiled
+// Java convention (r20-r27, f8-f15, then stack slots above the caller's
+// psABI scratch area) and calls the native function with the C convention
+// (out0-out7, f8-f15 by FP-argument count, then stack slots above our own
+// scratch area). JNIEnv* (and the class, for a static method) are extra
+// leading integer arguments, so an FP argument keeps its FP register --
+// unless the extra positions push it past the eighth and onto the stack.
+// Integer arguments always change register file (r20.. -> r32..), so no move
+// can overwrite a source still to be read.
+//
+// Frame, from sp up (4-byte stack slots):
+//
+//   sp + 0         psABI scratch (out_preserve_stack_slots)
+//                  outgoing C stack arguments
+//   oop_handle     8 words: handles for the Java argument registers
+//   klass          the class mirror's handle slot (static)
+//   lock           the BasicLock (synchronized)
+//   result         the native result across runtime calls: 16-byte stf.spill
+//                  image of f8, then r8
+//   fp - 16        caller's fp
+//   fp - 8         return address
+//
+// r6/r7 (Rbcp/Resp: C-preserved, unused by compiled code) hold the oop
+// handle and the BasicLock address across the native call.
+
+static int reg2offset_in(VMReg r) {
+  // An incoming stack argument, from fp (= the caller's sp).
+  return (r->reg2stack() + SharedRuntime::out_preserve_stack_slots()) * VMRegImpl::stack_slot_size;
+}
+
+static int reg2offset_out(VMReg r) {
+  // An outgoing stack argument, from sp.
+  return (r->reg2stack() + SharedRuntime::out_preserve_stack_slots()) * VMRegImpl::stack_slot_size;
+}
+
+// Move a non-oop, non-FP Java argument to its C position. 32-bit values are
+// kept sign-extended (as compiled code keeps ints), which is a valid C value.
+static void move_int(MacroAssembler* masm, VMRegPair src, VMRegPair dst, bool is_long) {
+  Register value;
+  if (src.first()->is_stack()) {
+    value = t2;
+    if (is_long) {
+      __ ld8(value, Address(fp, reg2offset_in(src.first())));
+    } else {
+      __ ld4s(value, Address(fp, reg2offset_in(src.first())));
+    }
+  } else {
+    value = src.first()->as_Register();
+  }
+  if (dst.first()->is_stack()) {
+    __ st8(Address(sp, reg2offset_out(dst.first())), value, t1);
+  } else {
+    __ mov(dst.first()->as_Register(), value);
+  }
+}
+
+// FP arguments: a Java float is single-typed in its register, a double
+// double-typed, so stfs/stfd store them exactly (ISA-NOTES.md).
+static void move_fp(MacroAssembler* masm, VMRegPair src, VMRegPair dst, bool is_double) {
+  FloatRegister value;
+  if (src.first()->is_stack()) {
+    value = f6;
+    __ add_imm(t1, fp, reg2offset_in(src.first()));
+    if (is_double) __ Assembler::ldfd(value, t1); else __ Assembler::ldfs(value, t1);
+  } else {
+    value = src.first()->as_FloatRegister();
+  }
+  if (dst.first()->is_stack()) {
+    __ add_imm(t1, sp, reg2offset_out(dst.first()));
+    if (is_double) __ Assembler::stfd(t1, value); else __ Assembler::stfs(t1, value);
+  } else if (dst.first()->as_FloatRegister() != value) {
+    __ fmov(dst.first()->as_FloatRegister(), value);
+  }
+}
+
+// An oop argument is passed as a handle: the address of a stack word holding
+// it (in the caller's frame if it arrived there, else in our handle area), or
+// null for a null oop. The oop map describes the word.
+static void object_move(MacroAssembler* masm, OopMap* map, int oop_handle_offset,
+                        int framesize_in_slots, VMRegPair src, VMRegPair dst,
+                        bool is_receiver, int* receiver_offset) {
+  Register rHandle = dst.first()->is_stack() ? t3 : dst.first()->as_Register();
+
+  if (src.first()->is_stack()) {
+    // Oop is already on the stack as an argument
+    int offset_in_older_frame = src.first()->reg2stack() + SharedRuntime::out_preserve_stack_slots();
+    map->set_oop(VMRegImpl::stack2reg(offset_in_older_frame + framesize_in_slots));
+    if (is_receiver) {
+      *receiver_offset = (offset_in_older_frame + framesize_in_slots) * VMRegImpl::stack_slot_size;
+    }
+    __ add_imm(rHandle, fp, reg2offset_in(src.first()), t1);
+    __ Assembler::ld8(t2, rHandle);
+  } else {
+    // Oop is in a register: store it in the handle area
+    const Register rOop = src.first()->as_Register();
+    int oop_slot = rOop->encoding() - j_rarg0->encoding();
+    assert(0 <= oop_slot && oop_slot < 8, "wrong register");
+    oop_slot = oop_slot * VMRegImpl::slots_per_word + oop_handle_offset;
+    int offset = oop_slot * VMRegImpl::stack_slot_size;
+
+    map->set_oop(VMRegImpl::stack2reg(oop_slot));
+    if (is_receiver) {
+      *receiver_offset = offset;
+    }
+    __ add_imm(rHandle, sp, offset, t1);
+    __ Assembler::st8(rHandle, rOop);   // may be null
+    __ mov(t2, rOop);
+  }
+  // a null oop passes a null handle
+  __ cmp_eq(ptmp0, ptmp1, t2, zr);
+  __ mov(rHandle, zr, ptmp0);
+  if (dst.first()->is_stack()) {
+    __ st8(Address(sp, reg2offset_out(dst.first())), rHandle, t1);
+  }
+}
+
+// The native result, kept in the frame across runtime calls.
+static void save_native_result(MacroAssembler* masm, int result_offset) {
+  __ adds(t1, result_offset, sp);
+  __ stf_spill(t1, f8);
+  __ adds(t1, result_offset + 16, sp);
+  __ Assembler::st8(t1, r8);
+}
+
+static void restore_native_result(MacroAssembler* masm, int result_offset) {
+  __ adds(t1, result_offset, sp);
+  __ ldf_fill(f8, t1);
+  __ adds(t1, result_offset + 16, sp);
+  __ Assembler::ld8(r8, t1);
+}
+
+// The C argument registers, around a C call made after the arguments are in
+// place (the synchronized slow path). Below sp, in a temporary extension of
+// the frame; the frame's last_Java_sp was recorded before, so stack walks
+// are unaffected.
+// 16 bytes of psABI scratch for the callee, out0-out7, f8-f15 (spill images).
+static const int arg_save_bytes = 16 + 8 * wordSize + 8 * 16;
+
+static void save_args(MacroAssembler* masm) {
+  __ adds(sp, -arg_save_bytes, sp);
+  for (int i = 0; i < 8; i++) {
+    __ adds(t1, 16 + i * wordSize, sp);       // above the scratch area
+    __ Assembler::st8(t1, as_Register(c_rarg0->encoding() + i));
+  }
+  for (int i = 0; i < 8; i++) {
+    __ add_imm(t1, sp, 16 + 8 * wordSize + i * 16);
+    __ stf_spill(t1, as_FloatRegister(8 + i));
+  }
+}
+
+static void restore_args(MacroAssembler* masm) {
+  for (int i = 0; i < 8; i++) {
+    __ adds(t1, 16 + i * wordSize, sp);
+    __ Assembler::ld8(as_Register(c_rarg0->encoding() + i), t1);
+  }
+  for (int i = 0; i < 8; i++) {
+    __ add_imm(t1, sp, 16 + 8 * wordSize + i * 16);
+    __ ldf_fill(as_FloatRegister(8 + i), t1);
+  }
+  __ adds(sp, arg_save_bytes, sp);
+}
+
+static nmethod* generate_jni_wrapper(MacroAssembler* masm,
+                                     const methodHandle& method,
+                                     int compile_id,
+                                     BasicType* in_sig_bt,
+                                     VMRegPair* in_regs,
+                                     BasicType ret_type) {
+  address native_func = method->native_function();
+  assert(native_func != nullptr, "must have function");
+
+  // An OopMap for lock (and class if static)
+  OopMapSet* oop_maps = new OopMapSet();
+  intptr_t start = (intptr_t)__ pc();
+
+  // We have received a description of where all the java arg are located
+  // on entry to the wrapper. We need to convert these args to where
+  // the jni function will expect them. To figure out where they go
+  // we convert the java signature to a C signature by inserting
+  // the hidden arguments as arg[0] and possibly arg[1] (static method)
+  const int total_in_args = method->size_of_parameters();
+  int total_c_args = total_in_args + (method->is_static() ? 2 : 1);
+
+  BasicType* out_sig_bt = NEW_RESOURCE_ARRAY(BasicType, total_c_args);
+  VMRegPair* out_regs   = NEW_RESOURCE_ARRAY(VMRegPair, total_c_args);
+
+  int argc = 0;
+  out_sig_bt[argc++] = T_ADDRESS;
+  if (method->is_static()) {
+    out_sig_bt[argc++] = T_OBJECT;
+  }
+  for (int i = 0; i < total_in_args ; i++) {
+    out_sig_bt[argc++] = in_sig_bt[i];
+  }
+
+  // Now figure out where the args must be stored and how much stack space
+  // they require.
+  int out_arg_slots = SharedRuntime::c_calling_convention(out_sig_bt, out_regs, total_c_args);
+
+  // Compute framesize for the wrapper, in 4-byte stack slots.
+  int stack_slots = SharedRuntime::out_preserve_stack_slots() + out_arg_slots;
+  stack_slots = align_up(stack_slots, VMRegImpl::slots_per_word);
+
+  // The inbound oop handle area: one word per Java argument register.
+  int oop_handle_offset = stack_slots;
+  stack_slots += 8 * VMRegImpl::slots_per_word;
+
+  int klass_slot_offset = 0;
+  int klass_offset = -1;
+  int lock_slot_offset = 0;
+  bool is_static = false;
+
+  if (method->is_static()) {
+    klass_slot_offset = stack_slots;
+    stack_slots += VMRegImpl::slots_per_word;
+    klass_offset = klass_slot_offset * VMRegImpl::stack_slot_size;
+    is_static = true;
+  }
+
+  // Plus a lock if needed
+  if (method->is_synchronized()) {
+    lock_slot_offset = stack_slots;
+    stack_slots += VMRegImpl::slots_per_word;
+  }
+
+  // The native result across runtime calls: a 16-byte-aligned spill image
+  // of f8, then r8.
+  stack_slots = align_up(stack_slots, 16 / VMRegImpl::stack_slot_size);
+  int result_offset = stack_slots * VMRegImpl::stack_slot_size;
+  stack_slots += (16 + wordSize) / VMRegImpl::stack_slot_size;
+
+  // The return address and saved fp
+  stack_slots += 2 * VMRegImpl::slots_per_word;
+
+  stack_slots = align_up(stack_slots, StackAlignmentInBytes / VMRegImpl::stack_slot_size);
+  int stack_size = stack_slots * VMRegImpl::stack_slot_size;
+
+  // First thing make an ic check to see if we should even be here
+  const Register receiver = j_rarg0;
+  __ verify_oop(receiver);
+  __ ic_check();
+
+  int vep_offset = ((intptr_t)__ pc()) - start;
+
+  // If we have to make this method not-entrant we'll overwrite its
+  // first instruction (NativeJump::patch_verified_entry).
+  __ nop();
+
+  // Generate stack overflow check
+  __ bang_stack_with_offset(checked_cast<int>(StackOverflow::stack_shadow_zone_size()));
+
+  // Generate a new frame for the wrapper: enter()'s shape at stack_size
+  // (C1_MacroAssembler::build_frame). t2/t3 are free at a method entry.
+  __ mov_from_br(t2, breturn);
+  __ mov(t3, sp);
+  __ add_imm(sp, sp, -stack_size);
+  __ adds(t1, frame::return_addr_offset * wordSize, t3);
+  __ Assembler::st8(t1, t2);
+  __ adds(t1, frame::link_offset * wordSize, t3);
+  __ Assembler::st8(t1, fp);
+  __ mov(fp, t3);
+
+  BarrierSetAssembler* bs = BarrierSet::barrier_set()->barrier_set_assembler();
+  bs->nmethod_entry_barrier(masm);
+
+  // Frame is now completed as far as size and linkage.
+  int frame_complete = ((intptr_t)__ pc()) - start;
+
+  // r6 holds the handle of the receiver (or the class) across the native call.
+  const Register oop_handle_reg = r6;
+
+  // -----------------
+  // The Grand Shuffle
+  //
+  // Arguments move from the Java convention to the C convention. Integer
+  // arguments change register file (r20.. -> out0..), FP arguments keep their
+  // register or go to the stack, so the order of the moves does not matter
+  // (see the comment above).
+
+  // Record esp-based slot for receiver on stack for non-static methods
+  int receiver_offset = -1;
+
+  // This is a trick. We double the stack slots so we can claim
+  // the oops in the caller's frame. Since we are sure to have
+  // more args than the caller doubling is enough to make
+  // sure we can capture all the incoming oop args from the
+  // caller.
+  OopMap* map = new OopMap(stack_slots * 2, 0 /* arg_slots*/);
+
+  for (int i = total_in_args - 1, c_arg = total_c_args - 1; i >= 0; i--, c_arg--) {
+    switch (in_sig_bt[i]) {
+      case T_ARRAY:
+      case T_OBJECT:
+        object_move(masm, map, oop_handle_offset, stack_slots, in_regs[i], out_regs[c_arg],
+                    ((i == 0) && (!is_static)), &receiver_offset);
+        break;
+      case T_VOID:
+        break;
+      case T_FLOAT:
+        move_fp(masm, in_regs[i], out_regs[c_arg], false);
+        break;
+      case T_DOUBLE:
+        assert(i + 1 < total_in_args &&
+               in_sig_bt[i + 1] == T_VOID &&
+               out_sig_bt[c_arg + 1] == T_VOID, "bad arg list");
+        move_fp(masm, in_regs[i], out_regs[c_arg], true);
+        break;
+      case T_LONG:
+        move_int(masm, in_regs[i], out_regs[c_arg], true);
+        break;
+      case T_ADDRESS:
+        assert(false, "found T_ADDRESS in java args");
+        break;
+      default:
+        move_int(masm, in_regs[i], out_regs[c_arg], false);
+    }
+  }
+
+  // Pre-load a static method's oop into c_rarg1.
+  if (method->is_static()) {
+    // load oop into a register
+    __ movoop(c_rarg1, JNIHandles::make_local(method->method_holder()->java_mirror()));
+
+    // Now handlize the static class mirror it's known not-null.
+    __ st8(Address(sp, klass_offset), c_rarg1, t1);
+    map->set_oop(VMRegImpl::stack2reg(klass_slot_offset));
+
+    // Now get the handle
+    __ add_imm(c_rarg1, sp, klass_offset, t1);
+  }
+
+  // Change state to native. The recorded pc only needs to point into this
+  // code, where the oop map is: the same pc/oopMap serve every call out.
+  {
+    Label the_pc;
+    __ bind(the_pc);
+    oop_maps->add_gc_map((intptr_t)__ pc() - start, map);
+    __ set_last_Java_frame(sp, noreg, the_pc, t2);
+  }
+
+  if (DTraceMethodProbes) {
+    Unimplemented();   // IA-64: dtrace probes in native wrappers
+  }
+
+  // RedefineClasses() tracing support for obsolete method entry
+  if (log_is_enabled(Trace, redefine, class, obsolete)) {
+    save_args(masm);
+    __ mov_metadata(c_rarg1, method());
+    __ call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::rc_trace_method_entry),
+                    Rthread, c_rarg1);
+    restore_args(masm);
+  }
+
+  // Lock a synchronized method
+  const Register lock_reg = r7;    // the BasicLock, preserved across the call
+  const Register obj_reg  = r16;
+  const Register ltmp1    = r17;
+  const Register ltmp2    = r18;
+  const Register ltmp3    = r19;
+
+  Label slow_path_lock;
+  Label lock_done;
+
+  if (method->is_synchronized()) {
+    assert(LockingMode == LM_LIGHTWEIGHT, "IA-64 supports lightweight locking only");
+
+    // Get the handle (the 2nd argument)
+    __ mov(oop_handle_reg, c_rarg1);
+
+    // Get address of the box
+    __ add_imm(lock_reg, sp, lock_slot_offset * VMRegImpl::stack_slot_size, t1);
+
+    // Load the oop from the handle
+    __ ld8(obj_reg, Address(oop_handle_reg, 0));
+
+    __ lightweight_lock(lock_reg, obj_reg, ltmp1, ltmp2, ltmp3, slow_path_lock);
+
+    // Slow path will re-enter here
+    __ bind(lock_done);
+  }
+
+  // Finally just about ready to make the JNI call
+
+  // get JNIEnv* which is first argument to native
+  __ lea(c_rarg0, Address(Rthread, JavaThread::jni_environment_offset()));
+
+  // Now set thread in native
+  __ mov_immediate(t2, _thread_in_native);
+  __ membar(MacroAssembler::LoadStore | MacroAssembler::StoreStore);
+  __ st4(Address(Rthread, JavaThread::thread_state_offset()), t2);
+
+  // Call the native method, through its function descriptor.
+  __ call_c(native_func);
+
+  // Unpack native results: the psABI leaves the upper bits of a narrow
+  // integer undefined, and a float result may be in any register format.
+  switch (ret_type) {
+    case T_BOOLEAN: __ zxt1(r8, r8); __ cmp_eq(ptmp0, ptmp1, r8, zr); __ adds(r8, 1, zr, ptmp1); break;
+    case T_CHAR:    __ zxt2(r8, r8); break;
+    case T_BYTE:    __ sxt1(r8, r8); break;
+    case T_SHORT:   __ sxt2(r8, r8); break;
+    case T_INT:     __ sxt4(r8, r8); break;
+    case T_FLOAT:
+      __ fcmp_unord(ptmp0, ptmp1, f8, f8);
+      __ fnorm_s(f8, f8, ptmp1);
+      break;
+    case T_DOUBLE:
+      __ fcmp_unord(ptmp0, ptmp1, f8, f8);
+      __ fnorm_d(f8, f8, ptmp1);
+      break;
+    default: break;
+  }
+
+  Label safepoint_in_progress, safepoint_in_progress_done;
+
+  // Switch thread to "native transition" state before reading the
+  // synchronization state (see riscv / the interpreter's native entry).
+  __ membar(MacroAssembler::LoadStore | MacroAssembler::StoreStore);
+  __ mov_immediate(t2, _thread_in_native_trans);
+  __ st4(Address(Rthread, JavaThread::thread_state_offset()), t2);
+
+  // Force this write out before the read below
+  if (!UseSystemMemoryBarrier) {
+    __ membar(MacroAssembler::AnyAny);
+  }
+
+  // check for safepoint operation in progress and/or pending suspend requests
+  {
+    // We need an acquire here to ensure that any subsequent load of the
+    // global SafepointSynchronize::_state flag is ordered after this load
+    // of the thread-local polling word.
+    __ safepoint_poll(safepoint_in_progress, true /* at_return */, true /* acquire */, false /* in_nmethod */);
+    __ ld4(t2, Address(Rthread, JavaThread::suspend_flags_offset()));
+    __ bnez(t2, safepoint_in_progress);
+    __ bind(safepoint_in_progress_done);
+  }
+
+  // change thread state
+  __ membar(MacroAssembler::LoadStore | MacroAssembler::StoreStore);
+  __ mov_immediate(t2, _thread_in_Java);
+  __ st4(Address(Rthread, JavaThread::thread_state_offset()), t2);
+
+  Label reguard;
+  Label reguard_done;
+  __ ld4(t2, Address(Rthread, JavaThread::stack_guard_state_offset()));
+  __ cmp4_eq_imm(ptmp0, ptmp1, StackOverflow::stack_guard_yellow_reserved_disabled, t2);
+  __ br_cond(reguard, ptmp0);
+  __ bind(reguard_done);
+
+  // native result if any is live
+
+  // Unlock
+  Label unlock_done;
+  Label slow_path_unlock;
+  if (method->is_synchronized()) {
+    // Get locked oop from the handle we passed to jni
+    __ ld8(obj_reg, Address(oop_handle_reg, 0));
+
+    save_native_result(masm, result_offset);
+    __ lightweight_unlock(obj_reg, ltmp1, ltmp2, ltmp3, slow_path_unlock);
+
+    // slow path re-enters here
+    __ bind(unlock_done);
+    restore_native_result(masm, result_offset);
+  }
+
+  __ reset_last_Java_frame(false);
+
+  // Unbox oop result, e.g. JNIHandles::resolve result.
+  if (is_reference_type(ret_type)) {
+    __ resolve_jobject(r8, t2, t3);
+  }
+
+  if (CheckJNICalls) {
+    // clear_pending_jni_exception_check
+    __ st8(Address(Rthread, JavaThread::pending_jni_exception_check_fn_offset()), zr);
+  }
+
+  // reset handle block
+  __ ld8(t2, Address(Rthread, JavaThread::active_handles_offset()));
+  __ st4(Address(t2, JNIHandleBlock::top_offset()), zr);
+
+  __ leave();
+
+#if INCLUDE_JFR
+  // We need to do a poll test after unwind in case the sampler
+  // managed to sample the native frame after returning to Java. The poll is
+  // a predicated branch out of line, as in compiled code (FRAME-DESIGN.md
+  // 11.7); the stub records its pc for the return handler blob.
+  Label L_return, L_poll_stub, L_poll_pc;
+  __ ld8(t2, Address(Rthread, JavaThread::polling_word_offset()));
+  __ tbit_nz(ptmp0, ptmp1, t2, exact_log2(SafepointMechanism::poll_bit()));
+  __ bind(L_poll_pc);
+  __ relocate(relocInfo::poll_return_type);
+  __ br_cond(L_poll_stub, ptmp0);
+  __ bind(L_return);
+#endif // INCLUDE_JFR
+
+  // Any exception pending?
+  Label exception_pending;
+  __ ld8(t2, Address(Rthread, Thread::pending_exception_offset()));
+  __ bnez(t2, exception_pending);
+
+  // We're done
+  __ ret();
+
+  // Unexpected paths are out of line and go here
+
+#if INCLUDE_JFR
+  __ bind(L_poll_stub);
+  assert(SharedRuntime::polling_page_return_handler_blob() != nullptr,
+         "polling page return stub not created yet");
+  __ la(t2, L_poll_pc, t0);
+  __ st8(Address(Rthread, JavaThread::saved_exception_pc_offset()), t2);
+  __ far_jump(SharedRuntime::polling_page_return_handler_blob()->entry_point());
+#endif // INCLUDE_JFR
+
+  // forward the exception (b0 = the return address, as after leave)
+  __ bind(exception_pending);
+  __ far_jump(StubRoutines::forward_exception_entry());
+
+  // Slow path locking & unlocking
+  if (method->is_synchronized()) {
+    __ block_comment("Slow path lock {");
+    __ bind(slow_path_lock);
+
+    // has last_Java_frame setup. No exceptions so do vanilla call not call_VM
+    // args are (oop obj, BasicLock* lock, JavaThread* thread)
+
+    // protect the args we've loaded
+    save_args(masm);
+
+    __ mov(c_rarg0, obj_reg);
+    __ mov(c_rarg1, lock_reg);
+    __ mov(c_rarg2, Rthread);
+    __ call_c(CAST_FROM_FN_PTR(address, SharedRuntime::complete_monitor_locking_C));
+    restore_args(masm);
+
+#ifdef ASSERT
+    { Label L;
+      __ ld8(t2, Address(Rthread, Thread::pending_exception_offset()));
+      __ beqz(t2, L);
+      __ stop("no pending exception allowed on exit from monitorenter");
+      __ bind(L);
+    }
+#endif
+    __ j(lock_done);
+
+    __ block_comment("} Slow path lock");
+
+    __ block_comment("Slow path unlock {");
+    __ bind(slow_path_unlock);
+
+    // the native result was saved before the fast path
+
+    // Save pending exception around call to VM (which contains an EXCEPTION_MARK).
+    // r6 held the handle, which is no longer needed: it is C-preserved.
+    __ ld8(oop_handle_reg, Address(Rthread, Thread::pending_exception_offset()));
+    __ st8(Address(Rthread, Thread::pending_exception_offset()), zr);
+
+    __ mov(c_rarg2, Rthread);
+    __ mov(c_rarg1, lock_reg);
+    __ mov(c_rarg0, obj_reg);
+    __ call_c(CAST_FROM_FN_PTR(address, SharedRuntime::complete_monitor_unlocking_C));
+
+#ifdef ASSERT
+    {
+      Label L;
+      __ ld8(t2, Address(Rthread, Thread::pending_exception_offset()));
+      __ beqz(t2, L);
+      __ stop("no pending exception allowed on exit complete_monitor_unlocking_C");
+      __ bind(L);
+    }
+#endif /* ASSERT */
+
+    __ st8(Address(Rthread, Thread::pending_exception_offset()), oop_handle_reg);
+
+    __ j(unlock_done);
+
+    __ block_comment("} Slow path unlock");
+  } // synchronized
+
+  // SLOW PATH Reguard the stack if needed
+
+  __ bind(reguard);
+  save_native_result(masm, result_offset);
+  __ call_c(CAST_FROM_FN_PTR(address, SharedRuntime::reguard_yellow_pages));
+  restore_native_result(masm, result_offset);
+  // and continue
+  __ j(reguard_done);
+
+  // SLOW PATH safepoint
+  {
+    __ block_comment("safepoint {");
+    __ bind(safepoint_in_progress);
+
+    // Don't use call_VM as it will see a possible pending exception and forward it
+    // and never return here preventing us from clearing _last_native_pc down below.
+    save_native_result(masm, result_offset);
+    __ mov(c_rarg0, Rthread);
+    __ call_c(CAST_FROM_FN_PTR(address, JavaThread::check_special_condition_for_native_trans));
+    restore_native_result(masm, result_offset);
+    __ j(safepoint_in_progress_done);
+    __ block_comment("} safepoint");
+  }
+
+  __ flush();
+
+  nmethod *nm = nmethod::new_native_nmethod(method,
+                                            compile_id,
+                                            masm->code(),
+                                            vep_offset,
+                                            frame_complete,
+                                            stack_slots / VMRegImpl::slots_per_word,
+                                            (is_static ? in_ByteSize(klass_offset) : in_ByteSize(receiver_offset)),
+                                            in_ByteSize(lock_slot_offset*VMRegImpl::stack_slot_size),
+                                            oop_maps);
+  assert(nm != nullptr, "create native nmethod fail!");
+  return nm;
+}
+
+// Native wrappers are nmethods: the method-handle intrinsics' dispatch, and
+// JNI wrappers for real native methods (generate_jni_wrapper).
 nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
                                                 const methodHandle& method,
                                                 int compile_id,
@@ -671,9 +1292,7 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
                                        in_ByteSize(-1),
                                        (OopMapSet*)nullptr);
   }
-  // A JNI wrapper for a real native method (C1-3).
-  Unimplemented();
-  return nullptr;
+  return generate_jni_wrapper(masm, method, compile_id, in_sig_bt, in_regs, ret_type);
 }
 
 // this function returns the adjust size (in number of words) to a c2i adapter

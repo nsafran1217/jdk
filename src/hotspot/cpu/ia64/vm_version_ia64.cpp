@@ -56,14 +56,6 @@ void VM_Version::initialize() {
   }
   FLAG_SET_DEFAULT(UseUnalignedAccesses, false);
 
-  // Native methods run through the interpreter's native entry until
-  // SharedRuntime::generate_native_wrapper can build JNI wrappers
-  // (FRAME-DESIGN.md 11.5); the method-handle intrinsics it does build.
-  if (!FLAG_IS_DEFAULT(PreferInterpreterNativeStubs) && !PreferInterpreterNativeStubs) {
-    warning("compiled native wrappers are not yet supported on IA-64");
-  }
-  FLAG_SET_DEFAULT(PreferInterpreterNativeStubs, true);
-
   // Every intrinsic below needs a hand-written stub in stubGenerator_ia64.cpp.
   // JIT-SCOPE.md phase 3 deliberately skips all of them: of cpu/riscv's 62 stub
   // generators, 13 are optional crypto/vector intrinsics, and dropping them is
