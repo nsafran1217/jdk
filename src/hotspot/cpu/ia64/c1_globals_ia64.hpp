@@ -1,0 +1,70 @@
+/*
+ * Copyright (c) 1997, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2026, IA-64 port contributors. All rights reserved.
+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ *
+ * This code is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 only, as
+ * published by the Free Software Foundation.
+ *
+ * This code is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ * version 2 for more details (a copy is included in the LICENSE file that
+ * accompanied this code).
+ *
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ *
+ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+ * or visit www.oracle.com if you need additional information or have any
+ * questions.
+ *
+ */
+
+#ifndef CPU_IA64_C1_GLOBALS_IA64_HPP
+#define CPU_IA64_C1_GLOBALS_IA64_HPP
+
+#include "utilities/globalDefinitions.hpp"
+#include "utilities/macros.hpp"
+
+// Sets the default values for platform dependent flags used by the client compiler.
+// (see c1_globals.hpp)
+//
+// As riscv, except the code-cache sizes: with one instruction per 16-byte
+// bundle, IA-64 code is roughly four times the size of RISC-V's, so the sizes
+// are scaled by ~4 (the three segments sum to ReservedCodeCacheSize).
+
+#ifndef COMPILER2
+define_pd_global(bool, BackgroundCompilation,        true );
+define_pd_global(bool, InlineIntrinsics,             true );
+define_pd_global(bool, PreferInterpreterNativeStubs, false);
+define_pd_global(bool, ProfileTraps,                 false);
+define_pd_global(bool, UseOnStackReplacement,        true );
+define_pd_global(bool, TieredCompilation,            false);
+define_pd_global(intx, CompileThreshold,             1500 );
+
+define_pd_global(intx, OnStackReplacePercentage,     933  );
+define_pd_global(intx, NewSizeThreadIncrease,        4*K  );
+define_pd_global(intx, InitialCodeCacheSize,         640*K);
+define_pd_global(intx, ReservedCodeCacheSize,        128*M);
+define_pd_global(intx, NonProfiledCodeHeapSize,      48*M );
+define_pd_global(intx, ProfiledCodeHeapSize,         48*M );
+define_pd_global(intx, NonNMethodCodeHeapSize,       32*M );
+define_pd_global(bool, ProfileInterpreter,           false);
+define_pd_global(intx, CodeCacheExpansionSize,       64*K );
+define_pd_global(uintx, CodeCacheMinBlockLength,     1);
+define_pd_global(uintx, CodeCacheMinimumUseSpace,    1600*K);
+// Client-compiler ergonomics, as on every port: a C1-only VM is never a
+// "server-class machine" and sizes its default heap from MaxRAM = 1 GB.
+define_pd_global(bool, NeverActAsServerClassMachine, true );
+define_pd_global(uint64_t, MaxRAM,                  1ULL*G);
+define_pd_global(bool, CICompileOSR,                 true );
+#endif // !COMPILER2
+define_pd_global(bool, UseTypeProfile,               false);
+
+define_pd_global(bool, OptimizeSinglePrecision,      true );
+define_pd_global(bool, CSEArrayLength,               false);
+
+#endif // CPU_IA64_C1_GLOBALS_IA64_HPP

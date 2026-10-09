@@ -220,6 +220,30 @@ inline NativeGeneralJump* nativeGeneralJump_at(address addr) {
   return (NativeGeneralJump*)addr;
 }
 
+// A load or store whose field offset C1 may patch (PatchingStub,
+// access_field_id). IA-64 has no displacement addressing, so there is no
+// in-instruction offset to patch; field accesses that need patching go through
+// deoptimization instead (as on riscv), and nothing should ever call these.
+class NativeMovRegMem : public NativeInstruction {
+ public:
+  enum IA64_specific_constants {
+    instruction_size        = NativeInstruction::instruction_size,
+    instruction_offset      = 0,
+    next_instruction_offset = NativeInstruction::instruction_size
+  };
+
+  int  num_bytes_to_end_of_patch() const { return instruction_offset + instruction_size; }
+  int  offset() const                    { Unimplemented(); }
+  void set_offset(int x)                 { Unimplemented(); }
+  void add_offset_in_bytes(int add_offset) { Unimplemented(); }
+
+  inline friend NativeMovRegMem* nativeMovRegMem_at(address addr);
+};
+
+inline NativeMovRegMem* nativeMovRegMem_at(address addr) {
+  return (NativeMovRegMem*)addr;
+}
+
 class NativeIllegalInstruction : public NativeInstruction {
  public:
   enum {
