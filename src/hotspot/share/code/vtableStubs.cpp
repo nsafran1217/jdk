@@ -95,7 +95,13 @@ VtableStub* volatile VtableStubs::_table[VtableStubs::N];
 int VtableStubs::_vtab_stub_size = 0;
 int VtableStubs::_itab_stub_size = 0;
 
-#if defined(PRODUCT)
+#if defined(IA64)
+  // One instruction per 16-byte bundle, and no displacement addressing: the
+  // stubs are several times the size of other ports'. Observed (fastdebug):
+  // vtable ~210, itable ~960 bytes, more with DebugVtables.
+  static const int first_vtableStub_size = 2048;
+  static const int first_itableStub_size = 2048;
+#elif defined(PRODUCT)
   // These values are good for the PRODUCT case (no tracing).
   static const int first_vtableStub_size =  64;
   static const int first_itableStub_size = 256;
