@@ -526,12 +526,172 @@ class StubGenerator: public StubCodeGenerator {
     return start;
   }
 
+  // ---- arraycopy ------------------------------------------------------------
+  //
+  // C1 calls these through StubRoutines::select_arraycopy_function, and the
+  // C++ defaults they replace cost a fixed ~45 ns (int) to ~100 ns (oop) per
+  // call on rx2800 whatever the length: most of a short copy. A stub copies
+  // up to arraycopy_inline_elements itself, element by element (each element
+  // one load and one store, so element atomicity holds), and tail-branches
+  // to the C++ default for anything longer, which keeps its bulk throughput.
+  //
+  // Called like a C function: a descriptor (function_entry) first, so C++
+  // can call it through a function pointer too; arguments src, dst, count
+  // (elements) in out0-out2. A leaf with no alloc (FRAME-DESIGN.md 1): after
+  // br.call the caller's outputs are this frame's r32-r34, br.ret restores
+  // the caller's frame, and the tail branch leaves b0 and ar.pfs exactly as
+  // the call set them, so the C++ function returns straight to our caller.
+  // Clobbers only C-scratch registers (r14-r21, t0-t2, gp, p6/p7, b6).
+  //
+  // Where the inline loop stops paying, in elements. Measured (release, C1,
+  // rx2800, 2026-10-09): the stub's own fixed cost is ~28 ns and its loop
+  // ~0.6 ns per int, long or oop, against the C++ copies' ~70 ns fixed (~130
+  // ns for oops, which go through the Access API) plus 0.03 (byte) to 0.29
+  // (long, oop) ns per element. Byte and short stores are as cheap only for
+  // the first ~16; beyond that they cost 1.5 (short) to 2.8 (byte) ns each
+  // (sub-word stores drain slowly once the store path fills; unverified why),
+  // so those hand over to memmove early.
+  static int arraycopy_inline_elements(int shift, bool is_oop) {
+    if (is_oop) return 256;
+    switch (shift) {
+      case 0:
+      case 1:  return 16;
+      case 2:  return 80;
+      default: return 128;
+    }
+  }
+
+  void load_inc(int shift, Register val, Register src, int step, PredicateRegister qp = pTrue) {
+    switch (shift) {
+      case 0: __ ld1_inc(val, src, step, qp); break;
+      case 1: __ ld2_inc(val, src, step, qp); break;
+      case 2: __ ld4_inc(val, src, step, qp); break;
+      case 3: __ ld8_inc(val, src, step, qp); break;
+      default: ShouldNotReachHere();
+    }
+  }
+
+  void store_inc(int shift, Register dst, Register val, int step, PredicateRegister qp = pTrue) {
+    switch (shift) {
+      case 0: __ st1_inc(dst, val, step, qp); break;
+      case 1: __ st2_inc(dst, val, step, qp); break;
+      case 2: __ st4_inc(dst, val, step, qp); break;
+      case 3: __ st8_inc(dst, val, step, qp); break;
+      default: ShouldNotReachHere();
+    }
+  }
+
+  // Copies count (>= 1) elements from src to dst, stepping by step (+-es),
+  // starting with the elements src and dst point at. An odd element first,
+  // then two per iteration through two pointer pairs, so both loads issue in
+  // one instruction group and both stores in the next. Clobbers src, dst,
+  // count, r14, r15, r19, r20, p6/p7.
+  void copy_elements(int shift, Register src, Register dst, Register count, int step, Label& done) {
+    const Register v0 = r14, v1 = r15, src1 = r19, dst1 = r20;
+    Label loop;
+    __ tbit_nz(ptmp0, ptmp1, count, 0);
+    load_inc(shift, v0, src, step, ptmp0);
+    store_inc(shift, dst, v0, step, ptmp0);
+    __ shru_imm(count, count, 1);
+    __ beqz(count, done);
+    __ adds(src1, step, src);
+    __ adds(dst1, step, dst);
+    __ bind(loop);
+    load_inc(shift, v0, src, 2 * step);
+    load_inc(shift, v1, src1, 2 * step);
+    __ adds(count, -1, count);
+    store_inc(shift, dst, v0, 2 * step);
+    store_inc(shift, dst1, v1, 2 * step);
+    __ bnez(count, loop);
+  }
+
+  address generate_copy(StubGenStubId stub_id, int shift, bool is_oop, bool disjoint, address cpp_copy) {
+    StubCodeMark mark(this, stub_id);
+    address start = __ function_entry();
+    Assembler::PackScope pack(_masm);
+
+    const Register src = c_rarg0, dst = c_rarg1, count = c_rarg2;
+    const Register oop_dst = r16, oop_count = r17, tmp = r18, bytes = r21;
+    const int es = 1 << shift;
+    DecoratorSet decorators = IN_HEAP | IS_ARRAY | (disjoint ? ARRAYCOPY_DISJOINT : 0);
+    BarrierSetAssembler* bs = BarrierSet::barrier_set()->barrier_set_assembler();
+    Label done, call_cpp, backward, copied;
+
+    __ beqz(count, done);
+    __ mov_immediate(t2, arraycopy_inline_elements(shift, is_oop));
+    __ bltu(t2, count, call_cpp);
+
+    if (is_oop) {
+      __ mov(oop_dst, dst);
+      __ mov(oop_count, count);
+      bs->arraycopy_prologue(_masm, decorators, true, src, dst, count, RegSet());
+    }
+    if (!disjoint) {
+      // Copy backwards iff dst starts inside [src, src + bytes): as an
+      // unsigned difference, 0 <= dst - src < bytes.
+      __ shl_imm(bytes, count, shift);
+      __ sub(t2, dst, src);
+      __ bltu(t2, bytes, backward);
+    }
+    copy_elements(shift, src, dst, count, es, copied);
+    if (!disjoint) {
+      __ br(copied);
+      __ bind(backward);
+      __ add(src, src, bytes);
+      __ adds(src, -es, src);
+      __ add(dst, dst, bytes);
+      __ adds(dst, -es, dst);
+      copy_elements(shift, src, dst, count, -es, copied);
+    }
+    __ bind(copied);
+    if (is_oop) {
+      bs->arraycopy_epilogue(_masm, decorators, true, oop_dst, oop_count, tmp, RegSet());
+    }
+    __ bind(done);
+    __ ret();
+
+    __ bind(call_cpp);
+    const address* fd = (const address*)cpp_copy;
+    __ movl(t0, (uint64_t)fd[0]);
+    __ movl(gp, (uint64_t)fd[1]);
+    __ jr(t0);
+
+    return start;
+  }
+
+  void generate_arraycopy_stubs() {
+    assert(!UseCompressedOops, "IA-64: compressed oops are off (FRAME-DESIGN.md 2.4)");
+    const int oop_shift = LogBytesPerHeapOop;
+#define COPY_STUBS(type, shift, is_oop, cpp)                                               \
+    StubRoutines::_##type##_arraycopy =                                                     \
+      generate_copy(StubGenStubId::type##_arraycopy_id, shift, is_oop, false,               \
+                    CAST_FROM_FN_PTR(address, StubRoutines::cpp));                          \
+    StubRoutines::_##type##_disjoint_arraycopy =                                            \
+      generate_copy(StubGenStubId::type##_disjoint_arraycopy_id, shift, is_oop, true,       \
+                    CAST_FROM_FN_PTR(address, StubRoutines::cpp));                          \
+    /* The aligned variants share the inline loop but fall back to the */                   \
+    /* arrayof_ C++ copies, which move whole words: ~3x faster when long. */                \
+    StubRoutines::_arrayof_##type##_arraycopy =                                             \
+      generate_copy(StubGenStubId::arrayof_##type##_arraycopy_id, shift, is_oop, false,     \
+                    CAST_FROM_FN_PTR(address, StubRoutines::arrayof_##cpp));                \
+    StubRoutines::_arrayof_##type##_disjoint_arraycopy =                                    \
+      generate_copy(StubGenStubId::arrayof_##type##_disjoint_arraycopy_id, shift, is_oop,   \
+                    true, CAST_FROM_FN_PTR(address, StubRoutines::arrayof_##cpp));
+    COPY_STUBS(jbyte,  0,         false, jbyte_copy)
+    COPY_STUBS(jshort, 1,         false, jshort_copy)
+    COPY_STUBS(jint,   2,         false, jint_copy)
+    COPY_STUBS(jlong,  3,         false, jlong_copy)
+    COPY_STUBS(oop,    oop_shift, true,  oop_copy)
+#undef COPY_STUBS
+    // The dest_uninitialized variants keep their C++ defaults: C1 never
+    // selects them.
+  }
+
   void generate_final_stubs() {
-    // No compiler calls the arraycopy stubs yet, and the C++ defaults
-    // StubRoutines installs serve the runtime.
     if (BarrierSet::barrier_set()->barrier_set_nmethod() != nullptr) {
       StubRoutines::_method_entry_barrier = generate_method_entry_barrier();
     }
+    generate_arraycopy_stubs();
     StubRoutines::ia64::set_completed();
   }
 

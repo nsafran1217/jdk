@@ -207,14 +207,12 @@ void LIR_Assembler::emit_arraycopy(LIR_OpArrayCopy* op) {
   const char *name = nullptr;
   address entry = StubRoutines::select_arraycopy_function(basic_type, aligned, disjoint, name, false);
 
-  // A zero-length copy must not reach the C++ copy functions (oop_copy
-  // asserts a non-zero count).
+  // Every arraycopy entry is a function descriptor -- the generated stubs
+  // start with one (StubGenerator::generate_copy) -- so a generated stub's
+  // entry lies in the code cache yet must be called like C, not far_call'ed.
+  // A zero-length copy skips the call altogether.
   __ beqz(c_rarg2, *stub->continuation());
-  if (CodeCache::contains(entry)) {
-    __ far_call(entry);
-  } else {
-    __ call_c(entry);
-  }
+  __ call_c(entry);
 
   __ bind(*stub->continuation());
 }
