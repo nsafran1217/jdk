@@ -119,6 +119,16 @@ void VM_Version::initialize() {
     FLAG_SET_DEFAULT(UseVectorizedMismatchIntrinsic, false);
   }
 
+  // Argument, return and parameter type profiling is not ported (neither the
+  // interpreter's nor C1's helpers record type entries), so the MDOs must not
+  // have them: refuse a requested level instead of mis-sizing the profile.
+  if (TypeProfileLevel != 0) {
+    if (!FLAG_IS_DEFAULT(TypeProfileLevel)) {
+      warning("TypeProfileLevel is not supported on IA-64 yet; using 0");
+    }
+    FLAG_SET_DEFAULT(TypeProfileLevel, 0);
+  }
+
 #ifdef COMPILER2
   // C2 passes ints with the upper 32 bits undefined (C2-DESIGN.md section 3),
   // so in a tiered VM a C1 frame can receive such an argument from C2 code.
