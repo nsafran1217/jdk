@@ -137,6 +137,15 @@ define_pd_global(intx, InlineSmallCode, 2500);
           "Reorder packable instructions within a basic block before packing " \
           "(BUNDLING.md, Stage 3)")                                            \
                                                                                  \
+  product(bool, UseDispersalTemplates, true, DIAGNOSTIC,                         \
+          "Pack into the bundle templates with the fewest I slots: Itanium 2 " \
+          "issues two bundles together only if their I-slot syllables, "       \
+          "nops included, fit its two I ports")                                \
+                                                                                 \
+  product(bool, UseBranchPacking, true, DIAGNOSTIC,                              \
+          "Put an IP-relative branch into slot 2 of the open bundle (MIB, "    \
+          "MMB, MFB) instead of a bundle of its own")                          \
+                                                                                 \
   product(bool, C1LazyIntExtension, true, DIAGNOSTIC,                            \
           "C1 leaves the upper 32 bits of an int register undefined and "      \
           "sign-extends only where a 64-bit value is consumed")              \

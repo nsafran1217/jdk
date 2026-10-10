@@ -275,7 +275,8 @@ class Assembler : public AbstractAssembler {
 
   // Resolve a label reference recorded at |branch| now that the label is
   // bound to |target|. Two kinds of site are ever registered:
-  //   - an IP-relative branch or call, alone in slot 2 of an MIB bundle;
+  //   - an IP-relative branch or call in slot 2 of an MIB bundle, or of an
+  //     MIB, MMB or MFB bundle it was packed into (pack_branch_slot);
   //   - the movl of an la() sequence (see below), an MLX bundle, which holds
   //     target minus the address of the `mov r = ip` bundle just before it.
   // pd_patch_instruction tells them apart by bundle template.
@@ -372,6 +373,7 @@ class Assembler : public AbstractAssembler {
   // barrier. Closes any open packed bundle first.
   void emit_bundle(ia64::Bundle b, const Deps* d = nullptr) {
     flush_window();
+    finalize_open_bundle();
     _ob_open = false;
     if (d != nullptr && UseStopElision &&
         _last_sect == code_section() && _last_off == raw_offset() - BytesPerBundle &&
@@ -412,7 +414,9 @@ class Assembler : public AbstractAssembler {
   // below), so whatever the caller records names the start of a fresh bundle,
   // and the next instruction opens it. Branches, movl and barriers always
   // close the open bundle and take a bundle of their own, so call sequences,
-  // patch sites and every shape a NativeInstruction recognises are unchanged.
+  // patch sites and every shape a NativeInstruction recognises are unchanged
+  // -- except that br_cond to a label may take slot 2 of the open bundle
+  // (UseBranchPacking), its patch site then being that bundle.
   enum Unit : uint8_t { U_M, U_I, U_A, U_F };
 
   void emit_m(ia64::Insn i, const Deps& d) { emit_unit(U_M, i, d); }
@@ -443,7 +447,7 @@ class Assembler : public AbstractAssembler {
     NoPackScope(Assembler* a) : PackScope(a, false) {}
   };
 
-  void close_bundle() { flush_window(); _ob_open = false; }
+  void close_bundle() { flush_window(); finalize_open_bundle(); _ob_open = false; }
 
   // Packing for everything this assembler emits outside explicit scopes
   // (C1_MacroAssembler turns it on for compiled code).
@@ -502,6 +506,8 @@ class Assembler : public AbstractAssembler {
   ia64::Insn   _ob_insn[3];
   Unit         _ob_unit[3];
   bool         _ob_stop[3];              // a stop precedes instruction k
+  ia64::Template _ob_br_tmpl = ia64::tMIB; // see pack_branch_slot
+  int          _ob_br_first = 0;
 
   static bool fits(Unit u, char slot) {
     switch (u) {
@@ -514,13 +520,20 @@ class Assembler : public AbstractAssembler {
   }
 
   // Find a template and increasing slots for n instructions (program order),
-  // honouring required stops with the template's internal stop. Prefers the
-  // placement that leaves the most room, then the fewest stops.
-  static bool place(int n, const Unit* u, const bool* stop, ia64::Template* tmpl, int* pos) {
-    struct T { ia64::Template t; const char* slots; int gb; };
+  // honouring required stops with the template's internal stop. While the
+  // bundle is open, prefers the placement that leaves the most room, then
+  // the fewest stops; |final| (the bundle is closing) drops the room
+  // criterion. Under UseDispersalTemplates ties then go to the template with
+  // the fewest I slots, then F slots: Itanium 2 disperses every syllable,
+  // nops included, to a port of its slot's type, and has four M ports but
+  // only two I and two F ports, so two MII bundles can never issue in the
+  // same cycle while two MMI or MMF bundles can.
+  static bool place(int n, const Unit* u, const bool* stop, ia64::Template* tmpl, int* pos,
+                    bool final = false) {
+    struct T { ia64::Template t; const char* slots; int gb; int icost; int fcost; };
     static const T ts[] = {
-      { ia64::tMII,  "MII", 0 }, { ia64::tMMI, "MMI", 0 }, { ia64::tMFI, "MFI", 0 },
-      { ia64::tMMF,  "MMF", 0 }, { ia64::tMI_I, "MII", 2 }, { ia64::tM_MI, "MMI", 1 }
+      { ia64::tMII,  "MII", 0, 2, 0 }, { ia64::tMMI, "MMI", 0, 1, 0 }, { ia64::tMFI, "MFI", 0, 1, 1 },
+      { ia64::tMMF,  "MMF", 0, 0, 1 }, { ia64::tMI_I, "MII", 2, 2, 0 }, { ia64::tM_MI, "MMI", 1, 1, 0 }
     };
     // Increasing slot tuples, for n = 1, 2, 3.
     static const int tuples1[3][3] = { {0}, {1}, {2} };
@@ -528,7 +541,10 @@ class Assembler : public AbstractAssembler {
     static const int tuples3[1][3] = { {0, 1, 2} };
     const int (*tuples)[3] = (n == 1) ? tuples1 : (n == 2) ? tuples2 : tuples3;
     const int ntuples = (n == 3) ? 1 : 3;
-    int best_last = 99, best_stops = 99;
+    const bool disp = UseDispersalTemplates;
+    // Lexicographic score: room (unless final), stops, I slots, F slots.
+    int best[4] = { 99, 99, 99, 99 };
+    bool found = false;
     for (const T& t : ts) {
       for (int i = 0; i < ntuples; i++) {
         const int* p = tuples[i];
@@ -537,15 +553,76 @@ class Assembler : public AbstractAssembler {
         for (int k = 1; k < n && ok; k++) {
           if (stop[k]) ok = (t.gb != 0 && p[k - 1] < t.gb && t.gb <= p[k]);
         }
-        int stops = (t.gb != 0) ? 1 : 0;
-        if (ok && (p[n - 1] < best_last || (p[n - 1] == best_last && stops < best_stops))) {
-          best_last = p[n - 1]; best_stops = stops;
+        if (!ok) continue;
+        int score[4] = { final ? 0 : p[n - 1], (t.gb != 0) ? 1 : 0,
+                         disp ? t.icost : 0, disp ? t.fcost : 0 };
+        bool better = false;
+        for (int k = 0; k < 4; k++) {
+          if (score[k] != best[k]) { better = score[k] < best[k]; break; }
+        }
+        if (better) {
+          for (int k = 0; k < 4; k++) best[k] = score[k];
+          found = true;
           *tmpl = t.t;
           for (int k = 0; k < n; k++) pos[k] = p[k];
         }
       }
     }
-    return best_last != 99;
+    return found;
+  }
+
+  // The open bundle is about to close: re-pick its template for its final
+  // contents, which may no longer need the room kept for later instructions.
+  // Must run while the bundle still ends in its own stop.
+  void finalize_open_bundle() {
+    if (!_ob_open || !UseDispersalTemplates || _ob_sect == nullptr) return;
+    int pos[3]; ia64::Template tmpl;
+    if (place(_ob_n, _ob_unit, _ob_stop, &tmpl, pos, true)) {
+      write_open_bundle(tmpl, pos);
+    }
+  }
+
+  // Put an IP-relative branch into slot 2 of the open bundle, as MIB, MMB or
+  // MFB, if its instructions fit slots 0-1 in order with no stop between
+  // them and the branch needs no stop before it (a compare's predicate is
+  // visible to a branch in its own group). The bundle then closes, keeping
+  // its stop. Returns the bundle's address, or nullptr if it did not fit.
+  address pack_branch_slot(const Deps& d) {
+    if (!UseBranchPacking || _pack_depth == 0 || !_ob_open || _ob_n > 2 ||
+        _ob_sect != code_section() || _ob_off != raw_offset() - BytesPerBundle ||
+        conflicts(d)) {
+      return nullptr;
+    }
+    if (_ob_n == 2 && _ob_stop[1]) return nullptr;
+    struct T { ia64::Template t; const char* slots; int icost; int fcost; };
+    static const T ts[] = {
+      { ia64::tMMB, "MMB", 0, 0 }, { ia64::tMIB, "MIB", 1, 0 }, { ia64::tMFB, "MFB", 0, 1 }
+    };
+    // Two instructions take slots 0 and 1; one takes slot 0 if it can (an
+    // M slot), else slot 1.
+    for (int first = 0; first + _ob_n <= 2; first++) {
+      for (const T& t : ts) {
+        bool ok = true;
+        for (int k = 0; k < _ob_n && ok; k++) ok = fits(_ob_unit[k], t.slots[first + k]);
+        if (ok) {
+          _ob_br_tmpl = t.t;
+          _ob_br_first = first;
+          return _ob_sect->start() + _ob_off;
+        }
+      }
+    }
+    return nullptr;
+  }
+  // Second half of pack_branch_slot, once the branch is encoded.
+  void write_branch_slot(ia64::Insn br) {
+    ia64::Insn slot[3] = { ia64::NopM(), ia64::NopI(), br };
+    for (int k = 0; k < _ob_n; k++) slot[_ob_br_first + k] = _ob_insn[k];
+    ia64::Bundle b = ia64::MakeBundle((ia64::Template)(_ob_br_tmpl | 1), slot[0], slot[1], slot[2]);
+    address p = _ob_sect->start() + _ob_off;
+    *(uint64_t*)p = b.lo;
+    *(uint64_t*)(p + 8) = b.hi;
+    _ob_open = false;
+    end_group();                        // the branch keeps its stop
   }
 
   // Encode the open bundle in place; it always ends in a stop until a later
@@ -722,6 +799,7 @@ class Assembler : public AbstractAssembler {
     }
     // A new bundle. The group continues into it, clearing the previous
     // bundle's end stop, only if that bundle allows it and nothing conflicts.
+    finalize_open_bundle();
     if (!conflict && UseStopElision &&
         _last_sect == code_section() && _last_off == raw_offset() - BytesPerBundle) {
       address prev = code_section()->start() + _last_off;
@@ -965,9 +1043,18 @@ class Assembler : public AbstractAssembler {
     br_cond(L, qp, !(qp == pTrue) ? (L.is_bound() ? ia64::kDptk : ia64::kDpnt) : ia64::kSptk);
   }
   void br_cond(Label& L, PredicateRegister qp, ia64::BranchHint hint) {
+    Deps d = D().r(qp).branch();
+    flush_window();
+    address bundle = pack_branch_slot(d);
+    if (bundle != nullptr) {
+      // The patch site is the open bundle, displacement measured from it.
+      address dest = code_section()->target(L, bundle);
+      write_branch_slot(ia64::BrCondRel(bundle_disp(dest, bundle), Q, hint));
+      return;
+    }
     close_bundle();
     address dest = target(L);
-    emit_b(ia64::BrCondRel(bundle_disp(dest), Q, hint), D().r(qp).branch());
+    emit_b(ia64::BrCondRel(bundle_disp(dest), Q, hint), d);
   }
   void br_call(BranchRegister b1, Label& L, QP) {
     _branch_reg_epoch++;
@@ -1099,8 +1186,9 @@ class Assembler : public AbstractAssembler {
 
  protected:
   // Displacement from the bundle being emitted to |dest|, in bundles.
-  int32_t bundle_disp(address dest) {
-    intptr_t d = dest - pc();
+  int32_t bundle_disp(address dest) { return bundle_disp(dest, pc()); }
+  int32_t bundle_disp(address dest, address from) {
+    intptr_t d = dest - from;
     assert(is_aligned(d, BytesPerBundle), "branch target must be bundle-aligned");
     d /= BytesPerBundle;
     guarantee(ia64::BranchDispInRange((int32_t)d), "branch out of +/-16 MiB range");

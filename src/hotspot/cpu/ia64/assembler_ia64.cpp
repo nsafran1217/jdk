@@ -41,9 +41,14 @@ void Assembler::pd_patch_instruction(address branch, address target, const char*
   ia64::Bundle* b = (ia64::Bundle*)branch;
   switch (bundle_template(b)) {
     case ia64::tMIB:
-    case ia64::tMIB_: {
+    case ia64::tMIB_:
+    case ia64::tMMB:
+    case ia64::tMMB_:
+    case ia64::tMFB:
+    case ia64::tMFB_: {
       // An IP-relative br.cond / br.call in slot 2 (Assembler::br_cond,
-      // br_call). The displacement is from the branch's own bundle.
+      // br_call; MMB and MFB when packed with the bundle's other
+      // instructions). The displacement is from the branch's own bundle.
       intptr_t disp = (target - branch) / BytesPerBundle;
       guarantee(ia64::BranchDispInRange((int32_t)disp),
                 "branch out of +/-16 MiB range at %s:%d", file, line);
