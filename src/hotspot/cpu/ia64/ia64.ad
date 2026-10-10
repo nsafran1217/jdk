@@ -653,6 +653,12 @@ inline bool call_through_descriptor(address entry) {
   return !CodeCache::contains(entry);
 }
 
+// Whether MachEpilogNode ends in the method's br.ret, as it does when it
+// polls (a method's Return); Ret then emits nothing.
+inline bool epilog_returns(const Compile* C) {
+  return C->is_method_compilation();
+}
+
 // Whether a memory node may be emitted as packable instructions
 // (C2_MacroAssembler::access): under UseC2BundlePacking, unless it is an
 // implicit null check's faulting access or the method has Unsafe accesses.
@@ -956,34 +962,46 @@ void MachEpilogNode::format(PhaseRegAlloc* ra_, outputStream* st) const {
   if (returns_int(C)) {
     st->print("sxt4 r8 = r8\t# int result\n\t");
   }
+  const bool poll = do_polling() && C->is_method_compilation();
+  if (poll) {
+    st->print("ld8 t2 = [Rthread + #%d]\t# polling word\n\t", in_bytes(JavaThread::polling_word_offset()));
+  }
   st->print("# pop frame %d\n\t", C->output()->frame_size_in_bytes());
   st->print("ld8 t0 = [fp - 8]\t# return address\n\t");
   st->print("ld8 t1 = [fp - 16]\n\t");
   st->print("mov sp = fp\n\t");
   st->print("mov fp = t1\n\t");
   st->print("mov b0 = t0");
-  if (do_polling() && C->is_method_compilation()) {
-    st->print("\n\t# test polling word\n\t");
-    st->print("ld8 t1 = [Rthread + #%d]\n\t", in_bytes(JavaThread::polling_word_offset()));
-    st->print("cmp.ltu p6 = t1, sp ; (p6) br slow_path");
+  if (poll) {
+    st->print("\n\tcmp.ltu p7, p6 = t2, sp ; (p6) br.ret b0 ; br slow_path");
   }
 }
 #endif
 
 void MachEpilogNode::emit(C2_MacroAssembler* masm, PhaseRegAlloc* ra_) const {
   Compile* C = ra_->C;
+  // The return poll: the polling word is loaded before the frame is popped,
+  // so its load issues beside leave()'s, and its test, the slow-path branch
+  // and the br.ret share one bundle (ret_unless_ltu). The Ret node that
+  // follows then emits nothing (epilog_returns).
+  const bool poll = do_polling() && C->is_method_compilation();
+  const bool reserved = StackReservedPages > 0 && C->has_reserved_stack_access();
+  assert(!do_polling() || poll == epilog_returns(C), "Ret relies on the epilog's br.ret");
 
   if (returns_int(C)) {
     // The interpreter's return entry takes r8 as its sign-extended int top
     // of stack; compiled code keeps only the low 32 bits defined.
     __ sxt4(r8, r8);
   }
+  if (poll && !reserved) {
+    __ ld8(t2, Address(Rthread, JavaThread::polling_word_offset()));
+  }
 
   // fp is the caller's sp: removing the frame is leave(), which leaves the
   // return address in b0.
   __ leave();
 
-  if (StackReservedPages > 0 && C->has_reserved_stack_access()) {
+  if (reserved) {
     // As C1's return_op: the frame is gone and b0 holds the return address;
     // an access to the reserved zone enables it and throws as though from
     // the caller.
@@ -996,9 +1014,12 @@ void MachEpilogNode::emit(C2_MacroAssembler* masm, PhaseRegAlloc* ra_) const {
     __ leave();
     __ far_jump(SharedRuntime::throw_delayed_StackOverflowError_entry());
     __ bind(no_reserved_zone_enabling);
+    if (poll) {
+      __ ld8(t2, Address(Rthread, JavaThread::polling_word_offset()));
+    }
   }
 
-  if (do_polling() && C->is_method_compilation()) {
+  if (poll) {
     Label dummy_label;
     Label* code_stub = &dummy_label;
     if (!C->output()->in_scratch_emit_size()) {
@@ -1006,8 +1027,10 @@ void MachEpilogNode::emit(C2_MacroAssembler* masm, PhaseRegAlloc* ra_) const {
       C->output()->add_stub(stub);
       code_stub = &stub->entry();
     }
+    // As safepoint_poll(at_return, in_nmethod): the slow path when the
+    // polling word is below sp.
     __ relocate(relocInfo::poll_return_type);
-    __ safepoint_poll(*code_stub, true /* at_return */, false /* acquire */, true /* in_nmethod */);
+    __ ret_unless_ltu(t2, sp, *code_stub);
   }
 }
 
@@ -6709,7 +6732,9 @@ instruct Ret()
   format %{ "br.ret b0\t# @Ret" %}
 
   ins_encode %{
-    __ ret();
+    if (!epilog_returns(ra_->C)) {
+      __ ret();
+    }
   %}
 
   ins_pipe(pipe_branch);

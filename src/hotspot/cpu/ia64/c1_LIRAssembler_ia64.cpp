@@ -409,10 +409,16 @@ void LIR_Assembler::return_op(LIR_Opr result, C1SafepointPollStub* code_stub) {
     __ sxt4(r8, r8);
   }
 
-  // Pop the stack before the safepoint code
+  // As C2's epilog: the polling word is loaded before the frame is popped,
+  // beside the frame's own loads, and its test, the slow-path branch and the
+  // br.ret share one bundle.
+  const bool reserved = StackReservedPages > 0 && compilation()->has_reserved_stack_access();
+  if (!reserved) {
+    __ ld8(t2, Address(Rthread, JavaThread::polling_word_offset()));
+  }
   __ remove_frame(initial_frame_size_in_bytes());
 
-  if (StackReservedPages > 0 && compilation()->has_reserved_stack_access()) {
+  if (reserved) {
     // The frame is gone and b0 holds the return address: an access to the
     // reserved zone enables it and throws as though from the caller.
     Label no_reserved_zone_enabling;
@@ -424,12 +430,14 @@ void LIR_Assembler::return_op(LIR_Opr result, C1SafepointPollStub* code_stub) {
     __ leave();
     __ far_jump(SharedRuntime::throw_delayed_StackOverflowError_entry());
     __ bind(no_reserved_zone_enabling);
+    __ ld8(t2, Address(Rthread, JavaThread::polling_word_offset()));
   }
 
+  // As safepoint_poll(at_return, in_nmethod): the slow path when the polling
+  // word is below sp.
   code_stub->set_safepoint_offset(__ offset());
   __ relocate(relocInfo::poll_return_type);
-  __ safepoint_poll(*code_stub->entry(), true /* at_return */, false /* acquire */, true /* in_nmethod */);
-  __ ret();
+  __ ret_unless_ltu(t2, sp, *code_stub->entry());
 }
 
 // A loop safepoint poll: the thread-local poll bit tested in a register and a

@@ -1058,6 +1058,21 @@ class Assembler : public AbstractAssembler {
     address dest = target(L);
     emit_b(ia64::BrCondRel(bundle_disp(dest), Q, hint), d);
   }
+  // { cmp.ltu p7,p6 = a, b ; (p6) br.ret b0 ; br.cond L }, one MBB bundle:
+  // return unless a < b (unsigned), else branch to L. One instruction group
+  // (a branch may read a predicate from its own group), where a compare,
+  // its branch and a separate br.ret take two. The return poll
+  // (MachEpilogNode). L's patch site is this bundle's slot 2.
+  void ret_unless_ltu(Register a, Register b, Label& L) {
+    close_bundle();
+    address bundle = AbstractAssembler::pc();
+    address dest = code_section()->target(L, bundle);
+    emit_bundle(ia64::MakeBundle(ia64::tMBB_,
+                                 ia64::CmpLtu(ptmp1.encoding(), ptmp0.encoding(), a->encoding(), b->encoding()),
+                                 ia64::BrRet(breturn.encoding(), ptmp0.encoding()),
+                                 ia64::BrCondRel(bundle_disp(dest, bundle), 0, ia64::kSptk)),
+                &D().w(ptmp0).w(ptmp1).r(a).r(b).r(breturn).branch());
+  }
   void br_call(BranchRegister b1, Label& L, QP) {
     _branch_reg_epoch++;
     close_bundle();
