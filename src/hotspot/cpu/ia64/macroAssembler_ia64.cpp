@@ -988,6 +988,35 @@ void MacroAssembler::java_div_rem(Register dst, Register a, Register b, bool wan
   sub(dst, a, t1);
 }
 
+void MacroAssembler::java_udiv_rem(Register dst, Register a, Register b, bool want_rem) {
+  const FloatRegister fa = f2, fb = f3, y = f4, e = f5, yn = f6;
+  const PredicateRegister p = ptmp0;
+  assert_different_registers(a, t1);
+  assert_different_registers(b, t1);
+  setf_sig(fa, a);
+  setf_sig(fb, b);
+  fnorm_reg(fa, fa, ia64::sf1);            // fcvt.xuf: exact for any 64 bits
+  fnorm_reg(fb, fb, ia64::sf1);
+  frcpa(y, p, fa, fb);                     // y  = 1 / b, approximately
+  fnma(e,  fb, y,  f1, ia64::sf1, p);      // e  = 1 - (b * y)
+  fma (yn, y,  e,  y,  ia64::sf1, p);      // y1 = y + (y * e)
+  fma (e,  e,  e,  f0, ia64::sf1, p);      // e1 = e * e
+  fma (yn, yn, e,  yn, ia64::sf1, p);      // y2 = y1 + (y1 * e1)
+  fma (e,  yn, fa, f0, ia64::sf1, p);      // q2 = y2 * a          (e is dead)
+  fnma(fa, fb, e,  fa, ia64::sf1, p);      // r  = a - (b * q2)    (fa reused)
+  fma (y,  fa, yn, e,  ia64::sf1, p);      // q3 = q2 + (r * y2), else y
+  fcvt_fxu_trunc(y, y, ia64::sf1);
+  if (!want_rem) {
+    getf_sig(dst, y);
+    return;
+  }
+  // a - q * b; the low 64 bits of the product are the same signed or not.
+  setf_sig(fb, b);
+  xma_l(fb, y, fb, f0);
+  getf_sig(t1, fb);
+  sub(dst, a, t1);
+}
+
 // ---- floating-point to integer conversions --------------------------------------
 //
 // Java semantics: truncate toward zero, NaN gives 0, out-of-range values

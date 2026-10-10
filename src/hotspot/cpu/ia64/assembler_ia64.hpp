@@ -1058,6 +1058,7 @@ class Assembler : public AbstractAssembler {
   // toward zero. NaN and out-of-range values give the integer indefinite
   // 0x8000000000000000 (Invalid Operation is disabled; vol. 3 fcvt.fx).
   void fcvt_fx_trunc(FloatRegister f1, FloatRegister f2, ia64::FpSf sf, QP) { emit_f(ia64::FcvtFxTrunc(f1->encoding(), f2->encoding(), sf, Q), D().w(f1).r(f2).r(qp)); }
+  void fcvt_fxu_trunc(FloatRegister f1, FloatRegister f2, ia64::FpSf sf, QP) { emit_f(ia64::FcvtFxuTrunc(f1->encoding(), f2->encoding(), sf, Q), D().w(f1).r(f2).r(qp)); }
   // p1 = relation, p2 = !relation; an unordered operand makes eq/lt/le false.
   void fcmp_eq(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpEq(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().w(p1).w(p2).r(f2).r(f3).r(qp).fp_predicate()); }
   void fcmp_lt(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpLt(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().w(p1).w(p2).r(f2).r(f3).r(qp).fp_predicate()); }

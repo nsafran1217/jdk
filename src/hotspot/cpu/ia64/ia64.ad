@@ -2949,6 +2949,70 @@ instruct modL(iRegL dst, iRegL src1, iRegL src2)
   ins_pipe(pipe_slow);
 %}
 
+// Unsigned divide and remainder (the divisor is non-zero: C2 tests it). An
+// int is zero-extended, which makes the signed 64-bit sequence exact.
+instruct UdivI(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
+%{
+  match(Set dst (UDivI src1 src2));
+
+  ins_cost(IDIV_COST);
+  format %{ "divu  $dst, $src1, $src2\t# int, @UdivI" %}
+
+  ins_encode %{
+    __ zxt4(t2, $src1$$Register);
+    __ zxt4(t3, $src2$$Register);
+    __ java_div_rem($dst$$Register, t2, t3, false);
+  %}
+
+  ins_pipe(pipe_slow);
+%}
+
+instruct UmodI(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
+%{
+  match(Set dst (UModI src1 src2));
+
+  ins_cost(IDIV_COST);
+  format %{ "remu  $dst, $src1, $src2\t# int, @UmodI" %}
+
+  ins_encode %{
+    __ zxt4(t2, $src1$$Register);
+    __ zxt4(t3, $src2$$Register);
+    __ java_div_rem($dst$$Register, t2, t3, true);
+  %}
+
+  ins_pipe(pipe_slow);
+%}
+
+instruct UdivL(iRegL dst, iRegL src1, iRegL src2)
+%{
+  match(Set dst (UDivL src1 src2));
+
+  ins_cost(IDIV_COST);
+  format %{ "divu  $dst, $src1, $src2\t# long, @UdivL" %}
+
+  ins_encode %{
+    __ java_udiv_rem($dst$$Register, $src1$$Register, $src2$$Register, false);
+  %}
+
+  ins_pipe(pipe_slow);
+%}
+
+instruct UmodL(iRegL dst, iRegL src1, iRegL src2)
+%{
+  match(Set dst (UModL src1 src2));
+
+  ins_cost(IDIV_COST);
+  format %{ "remu  $dst, $src1, $src2\t# long, @UmodL" %}
+
+  ins_encode %{
+    __ mov(t2, $src1$$Register);
+    __ mov(t3, $src2$$Register);
+    __ java_udiv_rem($dst$$Register, t2, t3, true);
+  %}
+
+  ins_pipe(pipe_slow);
+%}
+
 // Logical operations
 
 instruct andI_reg_reg(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)

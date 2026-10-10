@@ -557,6 +557,9 @@ class MacroAssembler : public Assembler {
   // b != 0, with Java's results for MIN_VALUE / -1. Inline, through the FP
   // unit. Clobbers f2-f6, ptmp0 and (for the remainder) t1. dst may be a or b.
   void java_div_rem(Register dst, Register a, Register b, bool want_rem);
+  // Unsigned 64-bit divide or remainder (b != 0): the same sequence with the
+  // unsigned conversions, fcvt.xuf (an fnorm) in and fcvt.fxu.trunc out.
+  void java_udiv_rem(Register dst, Register a, Register b, bool want_rem);
 
   // Java d2l/f2l and d2i/f2i: truncation, NaN -> 0, saturation. Clobbers f6,
   // t1, p6-p9.
