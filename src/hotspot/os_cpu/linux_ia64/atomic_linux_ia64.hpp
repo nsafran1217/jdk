@@ -149,10 +149,17 @@ inline T Atomic::PlatformCmpxchg<8>::operator()(T volatile* dest,
 // an aligned ld8/st8 pair cannot tear (SUPPORTS_NATIVE_CX8 is defined for the
 // same reason). Unaligned access, by contrast, *traps* on this architecture --
 // callers must respect alignment.
+//
+// A plain aligned 64-bit copy, not an __atomic builtin. GCC gives every
+// volatile access on IA-64 acquire or release semantics (ld8.acq / st8.rel),
+// and it marks the memory of every __atomic builtin volatile, relaxed ones
+// included. An st8.rel per element made Copy::conjoint_jlongs_atomic -- every
+// oop arraycopy past the stubs' inline limit, clone() and Arrays.copyOf --
+// cost ~9.5 ns per element. GCC does not split an aligned 8-byte scalar.
 inline void atomic_copy64(const volatile void *src, volatile void *dst) {
-  int64_t tmp;
-  __atomic_load(reinterpret_cast<const volatile int64_t*>(src), &tmp, __ATOMIC_RELAXED);
-  __atomic_store(reinterpret_cast<volatile int64_t*>(dst), &tmp, __ATOMIC_RELAXED);
+  const int64_t* s = reinterpret_cast<const int64_t*>(const_cast<const void*>(src));
+  int64_t* d = reinterpret_cast<int64_t*>(const_cast<void*>(dst));
+  *d = *s;
 }
 
 template<>
