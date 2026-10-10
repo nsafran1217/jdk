@@ -33,8 +33,8 @@
   //
   // The access kinds an .ad memory node emits.
   enum MemOp {
-    op_ld1, op_ld2, op_ld4, op_ld8, op_ld4_acq, op_ld8_acq,
-    op_st1, op_st2, op_st4, op_st8, op_st4_rel, op_st8_rel,
+    op_ld1, op_ld2, op_ld4, op_ld8, op_ld1_acq, op_ld2_acq, op_ld4_acq, op_ld8_acq,
+    op_st1, op_st2, op_st4, op_st8, op_st1_rel, op_st2_rel, op_st4_rel, op_st8_rel,
     op_ldfs, op_ldfd, op_stfs, op_stfd
   };
 

@@ -651,6 +651,11 @@ inline bool call_through_descriptor(address entry) {
   return !CodeCache::contains(entry) || MacroAssembler::is_function_entry(entry);
 }
 
+// Barrier folding (C2-DESIGN.md section 9): which MemBarAcquire/Release
+// nodes an ld.acq/st.rel/cmpxchg.acq already implements.
+bool unnecessary_acquire(const Node* barrier);
+bool unnecessary_release(const Node* barrier);
+
 class Node::PD {
 public:
   enum NodeFlags {
@@ -670,6 +675,62 @@ source %{
 // REQUIRED FUNCTIONALITY
 
 void PhaseOutput::pd_perform_mach_node_analysis() {
+}
+
+// Every acquiring load is emitted with acquire semantics itself: ldN.acq for
+// integer loads, ldf + mf for FP loads (no acquire form). The integer stores
+// have st.rel forms; FP stores do not. The atomics are all cmpxchg.acq,
+// xchg (acquire) or a cmpxchg.acq loop.
+static bool has_release_form(const Node* mem) {
+  switch (mem->Opcode()) {
+    case Op_StoreB: case Op_StoreC: case Op_StoreI: case Op_StoreL:
+    case Op_StoreP: case Op_StoreN:
+      return mem->as_Store()->is_release();
+    default:
+      return false;
+  }
+}
+
+static bool is_acquiring_atomic(int opcode) {
+  switch (opcode) {
+    case Op_CompareAndSwapI: case Op_CompareAndSwapL: case Op_CompareAndSwapP:
+    case Op_WeakCompareAndSwapI: case Op_WeakCompareAndSwapL: case Op_WeakCompareAndSwapP:
+    case Op_CompareAndExchangeI: case Op_CompareAndExchangeL: case Op_CompareAndExchangeP:
+    case Op_GetAndSetI: case Op_GetAndSetL: case Op_GetAndSetP:
+    case Op_GetAndAddI: case Op_GetAndAddL:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// A MemBarAcquire trailing a load or an atomic that is emitted in its
+// acquiring form adds nothing. Final graph reshaping cuts a trailing-load
+// barrier's edge to its load (compile.cpp, Op_MemBarAcquire), so the load
+// cannot be inspected here: hence every acquiring load acquires itself.
+bool unnecessary_acquire(const Node* barrier) {
+  MemBarNode* mb = barrier->as_MemBar();
+  if (mb->trailing_load()) {
+    return true;
+  }
+  if (mb->trailing_load_store()) {
+    Node* mem = mb->in(MemBarNode::Precedent);
+    return mem != nullptr && mem->is_LoadStore() && is_acquiring_atomic(mem->Opcode());
+  }
+  return false;
+}
+
+// A MemBarRelease leading a volatile store emitted as st.rel adds nothing:
+// st.rel orders every earlier access before the store. (The trailing
+// MemBarVolatile stays an mf.) Atomics have no release form here.
+bool unnecessary_release(const Node* barrier) {
+  MemBarNode* mb = barrier->as_MemBar();
+  if (!mb->leading_store()) {
+    return false;
+  }
+  MemBarNode* trailing = mb->trailing_membar();
+  Node* mem = trailing->in(MemBarNode::Precedent);
+  return mem != nullptr && mem->is_Store() && has_release_form(mem);
 }
 
 // Code is always bundle-aligned, which already satisfies every alignment a
@@ -3898,6 +3959,7 @@ instruct decodeKlass_not_null(iRegPNoSp dst, iRegN src)
 instruct loadB(iRegI dst, memory mem)
 %{
   match(Set dst (LoadB mem));
+  predicate(!n->as_Load()->is_acquire());
 
   ins_cost(LOAD_COST);
   format %{ "ld1 + sxt1, byte  $dst, $mem\t# @loadB" %}
@@ -3913,6 +3975,7 @@ instruct loadB(iRegI dst, memory mem)
 instruct loadB2L(iRegL dst, memory mem)
 %{
   match(Set dst (ConvI2L (LoadB mem)));
+  predicate(!n->in(1)->as_Load()->is_acquire());
 
   ins_cost(LOAD_COST);
   format %{ "ld1 + sxt1, byte -> long  $dst, $mem\t# @loadB2L" %}
@@ -3928,6 +3991,7 @@ instruct loadB2L(iRegL dst, memory mem)
 instruct loadUB(iRegI dst, memory mem)
 %{
   match(Set dst (LoadUB mem));
+  predicate(!n->as_Load()->is_acquire());
 
   ins_cost(LOAD_COST);
   format %{ "ld1, ubyte  $dst, $mem\t# @loadUB" %}
@@ -3943,6 +4007,7 @@ instruct loadUB(iRegI dst, memory mem)
 instruct loadUB2L(iRegL dst, memory mem)
 %{
   match(Set dst (ConvI2L (LoadUB mem)));
+  predicate(!n->in(1)->as_Load()->is_acquire());
 
   ins_cost(LOAD_COST);
   format %{ "ld1, ubyte -> long  $dst, $mem\t# @loadUB2L" %}
@@ -3958,6 +4023,7 @@ instruct loadUB2L(iRegL dst, memory mem)
 instruct loadS(iRegI dst, memory mem)
 %{
   match(Set dst (LoadS mem));
+  predicate(!n->as_Load()->is_acquire());
 
   ins_cost(LOAD_COST);
   format %{ "ld2 + sxt2, short  $dst, $mem\t# @loadS" %}
@@ -3973,6 +4039,7 @@ instruct loadS(iRegI dst, memory mem)
 instruct loadS2L(iRegL dst, memory mem)
 %{
   match(Set dst (ConvI2L (LoadS mem)));
+  predicate(!n->in(1)->as_Load()->is_acquire());
 
   ins_cost(LOAD_COST);
   format %{ "ld2 + sxt2, short -> long  $dst, $mem\t# @loadS2L" %}
@@ -3988,6 +4055,7 @@ instruct loadS2L(iRegL dst, memory mem)
 instruct loadUS(iRegI dst, memory mem)
 %{
   match(Set dst (LoadUS mem));
+  predicate(!n->as_Load()->is_acquire());
 
   ins_cost(LOAD_COST);
   format %{ "ld2, char  $dst, $mem\t# @loadUS" %}
@@ -4003,6 +4071,7 @@ instruct loadUS(iRegI dst, memory mem)
 instruct loadUS2L(iRegL dst, memory mem)
 %{
   match(Set dst (ConvI2L (LoadUS mem)));
+  predicate(!n->in(1)->as_Load()->is_acquire());
 
   ins_cost(LOAD_COST);
   format %{ "ld2, char -> long  $dst, $mem\t# @loadUS2L" %}
@@ -4018,6 +4087,7 @@ instruct loadUS2L(iRegL dst, memory mem)
 instruct loadI(iRegI dst, memory mem)
 %{
   match(Set dst (LoadI mem));
+  predicate(!n->as_Load()->is_acquire());
 
   ins_cost(LOAD_COST);
   format %{ "ld4, int (upper half undefined)  $dst, $mem\t# @loadI" %}
@@ -4033,6 +4103,7 @@ instruct loadI(iRegI dst, memory mem)
 instruct loadI2L(iRegL dst, memory mem)
 %{
   match(Set dst (ConvI2L (LoadI mem)));
+  predicate(!n->in(1)->as_Load()->is_acquire());
 
   ins_cost(LOAD_COST);
   format %{ "ld4 + sxt4, int -> long  $dst, $mem\t# @loadI2L" %}
@@ -4048,6 +4119,7 @@ instruct loadI2L(iRegL dst, memory mem)
 instruct loadUI2L(iRegL dst, memory mem, immL_32bits mask)
 %{
   match(Set dst (AndL (ConvI2L (LoadI mem)) mask));
+  predicate(!n->in(1)->in(1)->as_Load()->is_acquire());
 
   ins_cost(LOAD_COST);
   format %{ "ld4, uint -> long  $dst, $mem\t# @loadUI2L" %}
@@ -4063,6 +4135,7 @@ instruct loadUI2L(iRegL dst, memory mem, immL_32bits mask)
 instruct loadL(iRegL dst, memory mem)
 %{
   match(Set dst (LoadL mem));
+  predicate(!n->as_Load()->is_acquire());
 
   ins_cost(LOAD_COST);
   format %{ "ld8, long  $dst, $mem\t# @loadL" %}
@@ -4093,13 +4166,173 @@ instruct loadRange(iRegI dst, memory mem)
 instruct loadP(iRegPNoSp dst, memory mem)
 %{
   match(Set dst (LoadP mem));
-  predicate(n->as_Load()->barrier_data() == 0);
+  predicate(n->as_Load()->barrier_data() == 0 && !n->as_Load()->is_acquire());
 
   ins_cost(LOAD_COST);
   format %{ "ld8  $dst, $mem\t# ptr, @loadP" %}
 
   ins_encode %{
     __ access(C2_MacroAssembler::op_ld8, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+// Acquiring loads (volatile reads): ld.acq, with the trailing MemBarAcquire
+// folded away (unnecessary_acquire).
+instruct loadI_acq(iRegI dst, indirect mem)
+%{
+  match(Set dst (LoadI mem));
+  predicate(n->as_Load()->is_acquire());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "ld4.acq  $dst, $mem\t# int, @loadI_acq" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_ld4_acq, $dst$$reg, as_Register($mem$$base), 0);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct loadL_acq(iRegL dst, indirect mem)
+%{
+  match(Set dst (LoadL mem));
+  predicate(n->as_Load()->is_acquire());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "ld8.acq  $dst, $mem\t# long, @loadL_acq" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_ld8_acq, $dst$$reg, as_Register($mem$$base), 0);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct loadP_acq(iRegPNoSp dst, indirect mem)
+%{
+  match(Set dst (LoadP mem));
+  predicate(n->as_Load()->barrier_data() == 0 && n->as_Load()->is_acquire());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "ld8.acq  $dst, $mem\t# ptr, @loadP_acq" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_ld8_acq, $dst$$reg, as_Register($mem$$base), 0);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct loadN_acq(iRegN dst, indirect mem)
+%{
+  match(Set dst (LoadN mem));
+  predicate(n->as_Load()->is_acquire());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "ld4.acq  $dst, $mem\t# compressed ptr, @loadN_acq" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_ld4_acq, $dst$$reg, as_Register($mem$$base), 0);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct loadB_acq(iRegI dst, indirect mem)
+%{
+  match(Set dst (LoadB mem));
+  predicate(n->as_Load()->is_acquire());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "ld1.acq + sxt1, byte  $dst, $mem\t# @loadB_acq" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_ld1_acq, $dst$$reg, as_Register($mem$$base), 0);
+    __ sxt1($dst$$Register, $dst$$Register);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct loadUB_acq(iRegI dst, indirect mem)
+%{
+  match(Set dst (LoadUB mem));
+  predicate(n->as_Load()->is_acquire());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "ld1.acq, ubyte  $dst, $mem\t# @loadUB_acq" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_ld1_acq, $dst$$reg, as_Register($mem$$base), 0);
+    
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct loadS_acq(iRegI dst, indirect mem)
+%{
+  match(Set dst (LoadS mem));
+  predicate(n->as_Load()->is_acquire());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "ld2.acq + sxt2, short  $dst, $mem\t# @loadS_acq" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_ld2_acq, $dst$$reg, as_Register($mem$$base), 0);
+    __ sxt2($dst$$Register, $dst$$Register);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct loadUS_acq(iRegI dst, indirect mem)
+%{
+  match(Set dst (LoadUS mem));
+  predicate(n->as_Load()->is_acquire());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "ld2.acq, char  $dst, $mem\t# @loadUS_acq" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_ld2_acq, $dst$$reg, as_Register($mem$$base), 0);
+    
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+// FP loads have no acquire form: the load, then mf.
+instruct loadF_acq(fRegF dst, memory mem)
+%{
+  match(Set dst (LoadF mem));
+  predicate(n->as_Load()->is_acquire());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "ldfs + mf, float  $dst, $mem\t# @loadF_acq" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_ldfs, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ mf();
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+// FP loads have no acquire form: the load, then mf.
+instruct loadD_acq(fRegD dst, memory mem)
+%{
+  match(Set dst (LoadD mem));
+  predicate(n->as_Load()->is_acquire());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "ldfd + mf, double  $dst, $mem\t# @loadD_acq" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_ldfd, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ mf();
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4141,6 +4374,7 @@ instruct loadNKlass(iRegN dst, memory mem)
 instruct loadN(iRegN dst, memory mem)
 %{
   match(Set dst (LoadN mem));
+  predicate(!n->as_Load()->is_acquire());
 
   ins_cost(LOAD_COST);
   format %{ "ld4  $dst, $mem\t# compressed ptr, @loadN" %}
@@ -4155,6 +4389,7 @@ instruct loadN(iRegN dst, memory mem)
 instruct storeN(iRegN src, memory mem)
 %{
   match(Set mem (StoreN mem src));
+  predicate(!n->as_Store()->is_release());
 
   ins_cost(STORE_COST);
   format %{ "st4  $src, $mem\t# compressed ptr, @storeN" %}
@@ -4169,6 +4404,7 @@ instruct storeN(iRegN src, memory mem)
 instruct loadF(fRegF dst, memory mem)
 %{
   match(Set dst (LoadF mem));
+  predicate(!n->as_Load()->is_acquire());
 
   ins_cost(LOAD_COST);
   format %{ "ldfs  $dst, $mem\t# float, @loadF" %}
@@ -4183,6 +4419,7 @@ instruct loadF(fRegF dst, memory mem)
 instruct loadD(fRegD dst, memory mem)
 %{
   match(Set dst (LoadD mem));
+  predicate(!n->as_Load()->is_acquire());
 
   ins_cost(LOAD_COST);
   format %{ "ldfd  $dst, $mem\t# double, @loadD" %}
@@ -4197,6 +4434,7 @@ instruct loadD(fRegD dst, memory mem)
 instruct storeB(iRegIorL2I src, memory mem)
 %{
   match(Set mem (StoreB mem src));
+  predicate(!n->as_Store()->is_release());
 
   ins_cost(STORE_COST);
   format %{ "st1  $src, $mem\t# @storeB" %}
@@ -4211,6 +4449,7 @@ instruct storeB(iRegIorL2I src, memory mem)
 instruct storeC(iRegIorL2I src, memory mem)
 %{
   match(Set mem (StoreC mem src));
+  predicate(!n->as_Store()->is_release());
 
   ins_cost(STORE_COST);
   format %{ "st2  $src, $mem\t# @storeC" %}
@@ -4225,6 +4464,7 @@ instruct storeC(iRegIorL2I src, memory mem)
 instruct storeI(iRegIorL2I src, memory mem)
 %{
   match(Set mem (StoreI mem src));
+  predicate(!n->as_Store()->is_release());
 
   ins_cost(STORE_COST);
   format %{ "st4  $src, $mem\t# @storeI" %}
@@ -4239,6 +4479,7 @@ instruct storeI(iRegIorL2I src, memory mem)
 instruct storeL(iRegL src, memory mem)
 %{
   match(Set mem (StoreL mem src));
+  predicate(!n->as_Store()->is_release());
 
   ins_cost(STORE_COST);
   format %{ "st8  $src, $mem\t# @storeL" %}
@@ -4267,6 +4508,7 @@ instruct storeNKlass(iRegN src, memory mem)
 instruct storeimmB0(immI0 zero, memory mem)
 %{
   match(Set mem (StoreB mem zero));
+  predicate(!n->as_Store()->is_release());
 
   ins_cost(STORE_COST);
   format %{ "st1  r0, $mem\t# @storeimmB0" %}
@@ -4281,6 +4523,7 @@ instruct storeimmB0(immI0 zero, memory mem)
 instruct storeimmC0(immI0 zero, memory mem)
 %{
   match(Set mem (StoreC mem zero));
+  predicate(!n->as_Store()->is_release());
 
   ins_cost(STORE_COST);
   format %{ "st2  r0, $mem\t# @storeimmC0" %}
@@ -4295,6 +4538,7 @@ instruct storeimmC0(immI0 zero, memory mem)
 instruct storeimmI0(immI0 zero, memory mem)
 %{
   match(Set mem (StoreI mem zero));
+  predicate(!n->as_Store()->is_release());
 
   ins_cost(STORE_COST);
   format %{ "st4  r0, $mem\t# @storeimmI0" %}
@@ -4309,6 +4553,7 @@ instruct storeimmI0(immI0 zero, memory mem)
 instruct storeimmL0(immL0 zero, memory mem)
 %{
   match(Set mem (StoreL mem zero));
+  predicate(!n->as_Store()->is_release());
 
   ins_cost(STORE_COST);
   format %{ "st8  r0, $mem\t# @storeimmL0" %}
@@ -4323,7 +4568,7 @@ instruct storeimmL0(immL0 zero, memory mem)
 instruct storeP(iRegP src, memory mem)
 %{
   match(Set mem (StoreP mem src));
-  predicate(n->as_Store()->barrier_data() == 0);
+  predicate(n->as_Store()->barrier_data() == 0 && !n->as_Store()->is_release());
 
   ins_cost(STORE_COST);
   format %{ "st8  $src, $mem\t# ptr, @storeP" %}
@@ -4338,13 +4583,180 @@ instruct storeP(iRegP src, memory mem)
 instruct storeimmP0(immP0 zero, memory mem)
 %{
   match(Set mem (StoreP mem zero));
-  predicate(n->as_Store()->barrier_data() == 0);
+  predicate(n->as_Store()->barrier_data() == 0 && !n->as_Store()->is_release());
 
   ins_cost(STORE_COST);
   format %{ "st8  r0, $mem\t# ptr, @storeimmP0" %}
 
   ins_encode %{
     __ access(C2_MacroAssembler::op_st8, zr->encoding(), as_Register($mem$$base), $mem$$disp);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+// Releasing stores (volatile writes): st.rel, with the leading MemBarRelease
+// folded away (unnecessary_release).
+instruct storeB_rel(iRegIorL2I src, indirect mem)
+%{
+  match(Set mem (StoreB mem src));
+  predicate(n->as_Store()->is_release());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "st1.rel  $src, $mem\t# @storeB_rel" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_st1_rel, $src$$reg, as_Register($mem$$base), 0);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct storeC_rel(iRegIorL2I src, indirect mem)
+%{
+  match(Set mem (StoreC mem src));
+  predicate(n->as_Store()->is_release());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "st2.rel  $src, $mem\t# @storeC_rel" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_st2_rel, $src$$reg, as_Register($mem$$base), 0);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct storeimmB0_rel(immI0 zero, indirect mem)
+%{
+  match(Set mem (StoreB mem zero));
+  predicate(n->as_Store()->is_release());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "st1.rel  r0, $mem\t# @storeimmB0_rel" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_st1_rel, zr->encoding(), as_Register($mem$$base), 0);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct storeimmC0_rel(immI0 zero, indirect mem)
+%{
+  match(Set mem (StoreC mem zero));
+  predicate(n->as_Store()->is_release());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "st2.rel  r0, $mem\t# @storeimmC0_rel" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_st2_rel, zr->encoding(), as_Register($mem$$base), 0);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct storeI_rel(iRegIorL2I src, indirect mem)
+%{
+  match(Set mem (StoreI mem src));
+  predicate(n->as_Store()->is_release());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "st4.rel  $src, $mem\t# @storeI_rel" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_st4_rel, $src$$reg, as_Register($mem$$base), 0);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct storeL_rel(iRegL src, indirect mem)
+%{
+  match(Set mem (StoreL mem src));
+  predicate(n->as_Store()->is_release());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "st8.rel  $src, $mem\t# @storeL_rel" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_st8_rel, $src$$reg, as_Register($mem$$base), 0);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct storeN_rel(iRegN src, indirect mem)
+%{
+  match(Set mem (StoreN mem src));
+  predicate(n->as_Store()->is_release());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "st4.rel  $src, $mem\t# @storeN_rel" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_st4_rel, $src$$reg, as_Register($mem$$base), 0);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct storeP_rel(iRegP src, indirect mem)
+%{
+  match(Set mem (StoreP mem src));
+  predicate(n->as_Store()->barrier_data() == 0 && n->as_Store()->is_release());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "st8.rel  $src, $mem\t# @storeP_rel" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_st8_rel, $src$$reg, as_Register($mem$$base), 0);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct storeimmI0_rel(immI0 zero, indirect mem)
+%{
+  match(Set mem (StoreI mem zero));
+  predicate(n->as_Store()->is_release());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "st4.rel  r0, $mem\t# @storeimmI0_rel" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_st4_rel, zr->encoding(), as_Register($mem$$base), 0);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct storeimmL0_rel(immL0 zero, indirect mem)
+%{
+  match(Set mem (StoreL mem zero));
+  predicate(n->as_Store()->is_release());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "st8.rel  r0, $mem\t# @storeimmL0_rel" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_st8_rel, zr->encoding(), as_Register($mem$$base), 0);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct storeimmP0_rel(immP0 zero, indirect mem)
+%{
+  match(Set mem (StoreP mem zero));
+  predicate(n->as_Store()->barrier_data() == 0 && n->as_Store()->is_release());
+
+  ins_cost(VOLATILE_REF_COST);
+  format %{ "st8.rel  r0, $mem\t# @storeimmP0_rel" %}
+
+  ins_encode %{
+    __ access(C2_MacroAssembler::op_st8_rel, zr->encoding(), as_Register($mem$$base), 0);
   %}
 
   ins_pipe(pipe_class_memory);
@@ -5132,12 +5544,40 @@ instruct cmovP_cmpD(iRegPNoSp dst, iRegP src, fRegD op1, fRegD op2, cmpOp cop)
 // ============================================================================
 // Memory barriers (C2-DESIGN.md section 9)
 //
-// Bring-up form: every ordering barrier is a full mf. Folding acquire and
-// release barriers into ld.acq / st.rel comes with the ordered access forms.
+// Every barrier C2 keeps is a full mf (there is no lighter store-store or
+// load-load fence). Barriers an access already implements are folded:
+// ld.acq / cmpxchg.acq / xchg for MemBarAcquire, st.rel for the
+// MemBarRelease before a volatile store (unnecessary_acquire/release).
+
+instruct unnecessary_membar_acquire()
+%{
+  predicate(unnecessary_acquire(n));
+  match(MemBarAcquire);
+  ins_cost(0);
+
+  size(0);
+  format %{ "#@membar_acquire (elided: the access acquires)" %}
+  ins_encode(/* empty encoding */);
+  ins_pipe(pipe_class_empty);
+%}
 
 instruct membar_acquire()
 %{
+  predicate(!unnecessary_acquire(n));
   match(MemBarAcquire);
+  ins_cost(VOLATILE_REF_COST);
+
+  format %{ "mf\t# membar_acquire" %}
+
+  ins_encode %{
+    __ mf();
+  %}
+
+  ins_pipe(pipe_slow);
+%}
+
+instruct load_fence()
+%{
   match(LoadFence);
   ins_cost(VOLATILE_REF_COST);
 
@@ -5150,9 +5590,35 @@ instruct membar_acquire()
   ins_pipe(pipe_slow);
 %}
 
+instruct unnecessary_membar_release()
+%{
+  predicate(unnecessary_release(n));
+  match(MemBarRelease);
+  ins_cost(0);
+
+  size(0);
+  format %{ "#@membar_release (elided: st.rel)" %}
+  ins_encode(/* empty encoding */);
+  ins_pipe(pipe_class_empty);
+%}
+
 instruct membar_release()
 %{
+  predicate(!unnecessary_release(n));
   match(MemBarRelease);
+  ins_cost(VOLATILE_REF_COST);
+
+  format %{ "mf\t# membar_release" %}
+
+  ins_encode %{
+    __ mf();
+  %}
+
+  ins_pipe(pipe_slow);
+%}
+
+instruct store_fence()
+%{
   match(StoreFence);
   ins_cost(VOLATILE_REF_COST);
 

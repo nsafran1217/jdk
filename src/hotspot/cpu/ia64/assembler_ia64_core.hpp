@@ -410,6 +410,10 @@ inline Insn Ld8Acq(uint32_t r1, uint32_t r3, uint32_t qp = 0) { return LoadM1(0x
 inline Insn Ld4Acq(uint32_t r1, uint32_t r3, uint32_t qp = 0) { return LoadM1(0x16, r1, r3, qp); }
 inline Insn St8Rel(uint32_t r3, uint32_t r2, uint32_t qp = 0) { return StoreM4(0x37, r3, r2, qp); }
 inline Insn St4Rel(uint32_t r3, uint32_t r2, uint32_t qp = 0) { return StoreM4(0x36, r3, r2, qp); }
+inline Insn Ld2Acq(uint32_t r1, uint32_t r3, uint32_t qp = 0) { return LoadM1(0x15, r1, r3, qp); }
+inline Insn Ld1Acq(uint32_t r1, uint32_t r3, uint32_t qp = 0) { return LoadM1(0x14, r1, r3, qp); }
+inline Insn St2Rel(uint32_t r3, uint32_t r2, uint32_t qp = 0) { return StoreM4(0x35, r3, r2, qp); }
+inline Insn St1Rel(uint32_t r3, uint32_t r2, uint32_t qp = 0) { return StoreM4(0x34, r3, r2, qp); }
 
 // ---------------------------------------------------------------------------
 // M24: mf, the memory fence -- the architecture's only standalone barrier.

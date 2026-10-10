@@ -52,12 +52,16 @@ static ia64::Insn mem_insn(C2_MacroAssembler::MemOp op, int data, int addr) {
     case C2_MacroAssembler::op_ld2:     return ia64::Ld2(data, addr);
     case C2_MacroAssembler::op_ld4:     return ia64::Ld4(data, addr);
     case C2_MacroAssembler::op_ld8:     return ia64::Ld8(data, addr);
+    case C2_MacroAssembler::op_ld1_acq: return ia64::Ld1Acq(data, addr);
+    case C2_MacroAssembler::op_ld2_acq: return ia64::Ld2Acq(data, addr);
     case C2_MacroAssembler::op_ld4_acq: return ia64::Ld4Acq(data, addr);
     case C2_MacroAssembler::op_ld8_acq: return ia64::Ld8Acq(data, addr);
     case C2_MacroAssembler::op_st1:     return ia64::St1(addr, data);
     case C2_MacroAssembler::op_st2:     return ia64::St2(addr, data);
     case C2_MacroAssembler::op_st4:     return ia64::St4(addr, data);
     case C2_MacroAssembler::op_st8:     return ia64::St8(addr, data);
+    case C2_MacroAssembler::op_st1_rel: return ia64::St1Rel(addr, data);
+    case C2_MacroAssembler::op_st2_rel: return ia64::St2Rel(addr, data);
     case C2_MacroAssembler::op_st4_rel: return ia64::St4Rel(addr, data);
     case C2_MacroAssembler::op_st8_rel: return ia64::St8Rel(addr, data);
     case C2_MacroAssembler::op_ldfs:    return ia64::Ldfs(data, addr);
