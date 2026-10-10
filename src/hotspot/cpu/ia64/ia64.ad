@@ -7191,6 +7191,40 @@ instruct string_compress(iRegP src, iRegP dst, iRegI len, iRegI result,
   ins_pipe(pipe_slow);
 %}
 
+instruct encode_iso_array(iRegP src, iRegP dst, iRegI len, iRegI result,
+                         iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4, iRegPNoSp tmp5)
+%{
+  predicate(!((EncodeISOArrayNode*)n)->is_ascii());
+  match(Set result (EncodeISOArray src (Binary dst len)));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4, TEMP tmp5);
+
+  ins_cost(10 * DEFAULT_COST);
+  format %{ "Encode array $src, $dst, $len -> $result\t# @encode_iso_array" %}
+  ins_encode %{
+    __ char_array_compress($src$$Register, $dst$$Register, $len$$Register, $result$$Register,
+                           $tmp1$$Register, $tmp2$$Register, $tmp3$$Register, $tmp4$$Register,
+                           $tmp5$$Register, false);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
+instruct encode_ascii_array(iRegP src, iRegP dst, iRegI len, iRegI result,
+                         iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4, iRegPNoSp tmp5)
+%{
+  predicate(((EncodeISOArrayNode*)n)->is_ascii());
+  match(Set result (EncodeISOArray src (Binary dst len)));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4, TEMP tmp5);
+
+  ins_cost(10 * DEFAULT_COST);
+  format %{ "Encode array $src, $dst, $len -> $result\t# @encode_ascii_array" %}
+  ins_encode %{
+    __ char_array_compress($src$$Register, $dst$$Register, $len$$Register, $result$$Register,
+                           $tmp1$$Register, $tmp2$$Register, $tmp3$$Register, $tmp4$$Register,
+                           $tmp5$$Register, true);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
 instruct count_positives(iRegP ary, iRegI len, iRegI result,
                          iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4)
 %{

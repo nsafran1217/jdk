@@ -104,11 +104,12 @@
   // StrInflatedCopy: len Latin-1 bytes at src to UTF-16 chars at dst.
   void byte_array_inflate(Register src, Register dst, Register len,
                           Register tmp1, Register tmp2, Register tmp3, Register tmp4);
-  // StrCompressedCopy: len UTF-16 chars at src to Latin-1 bytes at dst.
-  // result = len, or the index of the first char above 0xff.
+  // StrCompressedCopy and EncodeISOArray: len UTF-16 chars at src to bytes
+  // at dst. result = len, or the index of the first char above 0xff (0x7f
+  // if ascii).
   void char_array_compress(Register src, Register dst, Register len, Register result,
                            Register tmp1, Register tmp2, Register tmp3, Register tmp4,
-                           Register tmp5);
+                           Register tmp5, bool ascii = false);
   // CountPositives: len bytes at ary (any alignment). result = len if none
   // is negative, else at most the index of the first negative byte.
   void count_positives(Register ary, Register len, Register result,

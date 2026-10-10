@@ -540,7 +540,10 @@ void C2_MacroAssembler::byte_array_inflate(Register src_in, Register dst_in, Reg
 // char at a time, which stops at the exact index.
 void C2_MacroAssembler::char_array_compress(Register src_in, Register dst_in, Register len_in,
                                             Register result, Register tmp1, Register tmp2,
-                                            Register tmp3, Register tmp4, Register tmp5) {
+                                            Register tmp3, Register tmp4, Register tmp5,
+                                            bool ascii) {
+  const int bits = ascii ? 7 : 8;        // a char fits if char >> bits == 0
+  const uint64_t wide = ascii ? 0xff80ff80ff80ff80ULL : 0xff00ff00ff00ff00ULL;
   const Register src = tmp4, dst = tmp5, len = tmp3;   // len: chars left
   Label head, aligned, word_loop, word_fail, tail, done;
   mov(src, src_in);
@@ -552,7 +555,7 @@ void C2_MacroAssembler::char_array_compress(Register src_in, Register dst_in, Re
   and_imm(t1, 7, dst);
   beqz(t1, aligned);
   ld2_inc(tmp1, src, 2);
-  shru_imm(tmp2, tmp1, 8);
+  shru_imm(tmp2, tmp1, bits);
   bnez(tmp2, done);
   st1_inc(dst, tmp1, 1);
   adds(result, 1, result);
@@ -561,7 +564,7 @@ void C2_MacroAssembler::char_array_compress(Register src_in, Register dst_in, Re
   bind(aligned);
   and_imm(t1, 7, src);
   bnez(t1, tail);
-  mov_immediate(tmp2, (int64_t)0xff00ff00ff00ff00ULL);
+  mov_immediate(tmp2, (int64_t)wide);
   bind(word_loop);
   mov_immediate(t1, 8);
   cmp_lt(ptmp0, ptmp1, len, t1);
@@ -581,7 +584,7 @@ void C2_MacroAssembler::char_array_compress(Register src_in, Register dst_in, Re
   bind(tail);
   beqz(len, done);
   ld2_inc(tmp1, src, 2);
-  shru_imm(tmp2, tmp1, 8);
+  shru_imm(tmp2, tmp1, bits);
   bnez(tmp2, done);
   st1_inc(dst, tmp1, 1);
   adds(result, 1, result);
