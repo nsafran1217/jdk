@@ -7128,6 +7128,38 @@ instruct string_compareUL(iRegP str1, iRegI cnt1, iRegP str2, iRegI cnt2, iRegI 
   ins_pipe(pipe_slow);
 %}
 
+instruct stringL_indexof_char(iRegP str1, iRegI cnt1, iRegI ch, iRegI result,
+                              iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4)
+%{
+  predicate(((StrIndexOfCharNode*)n)->encoding() == StrIntrinsicNode::L);
+  match(Set result (StrIndexOfChar (Binary str1 cnt1) ch));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4);
+
+  ins_cost(10 * DEFAULT_COST);
+  format %{ "String IndexOf char $str1, $cnt1, $ch -> $result\t# @stringL_indexof_char" %}
+  ins_encode %{
+    __ string_indexof_char($str1$$Register, $cnt1$$Register, $ch$$Register, $result$$Register,
+                           $tmp1$$Register, $tmp2$$Register, $tmp3$$Register, $tmp4$$Register, true);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
+instruct stringU_indexof_char(iRegP str1, iRegI cnt1, iRegI ch, iRegI result,
+                              iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4)
+%{
+  predicate(((StrIndexOfCharNode*)n)->encoding() == StrIntrinsicNode::U);
+  match(Set result (StrIndexOfChar (Binary str1 cnt1) ch));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4);
+
+  ins_cost(10 * DEFAULT_COST);
+  format %{ "String IndexOf char $str1, $cnt1, $ch -> $result\t# @stringU_indexof_char" %}
+  ins_encode %{
+    __ string_indexof_char($str1$$Register, $cnt1$$Register, $ch$$Register, $result$$Register,
+                           $tmp1$$Register, $tmp2$$Register, $tmp3$$Register, $tmp4$$Register, false);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
 instruct count_positives(iRegP ary, iRegI len, iRegI result,
                          iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4)
 %{

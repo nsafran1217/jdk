@@ -96,6 +96,11 @@
   void string_compare(Register str1, Register cnt1, Register str2, Register cnt2, Register result,
                       Register tmp1, Register tmp2, Register tmp3, Register tmp4, Register tmp5,
                       int ae);
+  // StrIndexOfChar: cnt chars at str (Latin-1 bytes if isL, else UTF-16
+  // chars), any alignment; ch fits the encoding. result = the index of the
+  // first ch, or -1.
+  void string_indexof_char(Register str, Register cnt, Register ch, Register result,
+                           Register tmp1, Register tmp2, Register tmp3, Register tmp4, bool isL);
   // CountPositives: len bytes at ary (any alignment). result = len if none
   // is negative, else at most the index of the first negative byte.
   void count_positives(Register ary, Register len, Register result,

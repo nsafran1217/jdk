@@ -430,3 +430,66 @@ void C2_MacroAssembler::count_positives(Register ary_in, Register len_in, Regist
   j(tail_loop);
   bind(done);
 }
+
+// Element by element up to an 8-byte boundary, then whole words: czx on the
+// word xor the broadcast char finds the lowest matching element (czx's "none
+// found" value, 8 or 4, is the elements per word), then the tail.
+void C2_MacroAssembler::string_indexof_char(Register str_in, Register cnt_in, Register ch,
+                                            Register result, Register tmp1, Register tmp2,
+                                            Register tmp3, Register tmp4, bool isL) {
+  const Register str = tmp3, cnt = tmp4;  // cnt: chars left
+  const int per_word = isL ? 8 : 4;
+  Label head, words, word_loop, found_word, tail, not_found, done;
+  mov(str, str_in);
+  sxt4(cnt, cnt_in);
+  mov(result, zr);                        // the index of the next char
+  // ch is a lazy int in [0, 0xff] or [0, 0xffff]: its low 32 bits are
+  // exact, so cmp4 against a zero-extended load needs no extension.
+  if (isL) {
+    zxt1(tmp2, ch);
+    mux1_brcst(tmp2, tmp2);
+  } else {
+    zxt2(tmp2, ch);
+    mux2(tmp2, tmp2, 0);
+  }
+  bind(head);
+  beqz(cnt, not_found);
+  and_imm(t1, 7, str);
+  beqz(t1, words);
+  if (isL) ld1_inc(tmp1, str, 1); else ld2_inc(tmp1, str, 2);
+  cmp4_eq(ptmp0, ptmp1, tmp1, ch);
+  br_cond(done, ptmp0);
+  adds(result, 1, result);
+  adds(cnt, -1, cnt);
+  j(head);
+
+  bind(words);
+  mov_immediate(t1, per_word);
+  bind(word_loop);
+  cmp_lt(ptmp0, ptmp1, cnt, t1);
+  br_cond(tail, ptmp0);
+  ld8_inc(tmp1, str, 8);
+  xor_(tmp1, tmp1, tmp2);
+  if (isL) czx1_r(tmp1, tmp1); else czx2_r(tmp1, tmp1);
+  cmp_ne(ptmp0, ptmp1, tmp1, t1);
+  br_cond(found_word, ptmp0);
+  adds(result, per_word, result);
+  adds(cnt, -per_word, cnt);
+  j(word_loop);
+  bind(found_word);
+  add(result, result, tmp1);
+  j(done);
+
+  bind(tail);
+  beqz(cnt, not_found);
+  if (isL) ld1_inc(tmp1, str, 1); else ld2_inc(tmp1, str, 2);
+  cmp4_eq(ptmp0, ptmp1, tmp1, ch);
+  br_cond(done, ptmp0);
+  adds(result, 1, result);
+  adds(cnt, -1, cnt);
+  j(tail);
+
+  bind(not_found);
+  mov_immediate(result, -1);
+  bind(done);
+}

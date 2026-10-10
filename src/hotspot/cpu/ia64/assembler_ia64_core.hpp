@@ -810,6 +810,14 @@ inline Insn Mux1(uint32_t r1, uint32_t r2, uint32_t mbtype4, uint32_t qp = 0) {
          fSlot3(mbtype4) | fR2(r2) | fR1(r1) | fQp(qp);
 }
 static const uint32_t kMux1Rev = 0xb;   // byte reverse -- Long.reverseBytes
+static const uint32_t kMux1Brcst = 0x0; // every byte = the lowest byte
+
+// I4: mux2 r1 = r2, mhtype8. Each 2-bit field of mhtype8 picks the source
+// halfword for one destination halfword; 0 broadcasts halfword 0.
+inline Insn Mux2(uint32_t r1, uint32_t r2, uint32_t mht8, uint32_t qp = 0) {
+  return fOp(7) | fZa(0) | fZb(1) | fVeI(0) | fX2a(3) | fX2bI(2) | fX2c(2) |
+         (Insn(mht8 & 0xff) << 20) | fR2(r2) | fR1(r1) | fQp(qp);
+}
 
 // I10: shrp. Major opcode 5, x2 = 3, x = 0; the shift count reuses the 6-bit
 // field at 32:27 that fX6b already models.
