@@ -25,6 +25,7 @@
 
 #include "asm/assembler.hpp"
 #include "asm/assembler.inline.hpp"
+#include "ci/ciEnv.hpp"
 #include "opto/c2_MacroAssembler.hpp"
 #include "opto/compile.hpp"
 #include "opto/intrinsicnode.hpp"
@@ -840,4 +841,16 @@ void C2_MacroAssembler::string_indexof(Register str1, Register cnt1, Register st
   bind(not_found);
   mov_immediate(result, -1);
   bind(done);
+}
+
+// C2 measures node sizes in a scratch buffer (PhaseOutput::scratch_emit_size):
+// no trampolines are emitted there (MacroAssembler::trampoline_call).
+bool C2_MacroAssembler::in_scratch_emit_size() {
+  if (ciEnv::current()->task() != nullptr) {
+    PhaseOutput* phase_output = Compile::current()->output();
+    if (phase_output != nullptr && phase_output->in_scratch_emit_size()) {
+      return true;
+    }
+  }
+  return MacroAssembler::in_scratch_emit_size();
 }

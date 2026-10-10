@@ -614,14 +614,14 @@ class CallStubImpl {
   //--------------------------------------------------------------
 
  public:
-  // Size of call trampoline stub.
+  // Size of call trampoline stub (MacroAssembler::trampoline_call).
   static uint size_call_trampoline() {
-    return 0; // no call trampolines on this platform
+    return MacroAssembler::max_trampoline_stub_size();
   }
 
   // number of relocations needed by a call trampoline stub
   static uint reloc_call_trampoline() {
-    return 0; // no call trampolines on this platform
+    return 5; // as aarch64
   }
 };
 
@@ -643,10 +643,10 @@ class HandlerImpl {
   }
 };
 
-// Calls into the code cache (stubs, blobs) are far_calls, unless the stub
-// starts with a function descriptor (MacroAssembler::function_entry: stubs
-// C++ also calls, such as arraycopy). Those, and C functions, are called
-// through the descriptor.
+// Calls into the code cache (stubs, blobs) are trampoline_calls, unless the
+// stub starts with a function descriptor (MacroAssembler::function_entry:
+// stubs C++ also calls, such as arraycopy). Those, and C functions, are
+// called through the descriptor.
 inline bool call_through_descriptor(address entry) {
   return !CodeCache::contains(entry) || MacroAssembler::is_function_entry(entry);
 }
@@ -764,9 +764,9 @@ int MachNode::compute_padding(int current_offset) const {
 
 // Byte offset from the start of each kind of call node to the return address,
 // i.e. the end of the br.call bundle. Each call node is a fixed shape:
-// MacroAssembler::far_call's seven-bundle cell form (NativeCall,
-// FRAME-DESIGN.md 11.2), preceded for dynamic calls by the movl of the
-// inline-cache data (ic_call).
+// MacroAssembler::trampoline_call's one-bundle IP-relative br.call
+// (NativeCall), preceded for dynamic calls by the movl of the inline-cache
+// data (ic_call).
 
 int MachCallStaticJavaNode::ret_addr_offset() {
   return NativeCall::instruction_size;
@@ -778,7 +778,7 @@ int MachCallDynamicJavaNode::ret_addr_offset() {
 
 // Runtime calls: see call_through_descriptor (source_hpp). A descriptor
 // call is the anchor's pc store (mov ip, adds, adds, st8), then call_c's movl
-// entry, movl gp, mov b6, br.call; anything else a far_call.
+// entry, movl gp, mov b6, br.call; anything else a trampoline_call.
 int MachCallRuntimeNode::ret_addr_offset() {
   if (call_through_descriptor(_entry_point)) {
     return 8 * BytesPerBundle;
@@ -1518,13 +1518,16 @@ bool Matcher::pd_clone_address_expressions(AddPNode* m, Matcher::MStack& mstack,
 // tertiary opcode.  Only the opcode sections which a particular
 // instruction needs for encoding need to be specified.
 encode %{
-  // Java calls: the seven-bundle cell form (MacroAssembler::far_call,
+  // Java calls: one IP-relative br.call (MacroAssembler::trampoline_call,
   // NativeCall), whose size MachCallStaticJavaNode::ret_addr_offset assumes.
   enc_class ia64_enc_java_static_call(method meth) %{
     address addr = (address)$meth$$method;
     if (!_method) {
       // A call to a runtime wrapper, e.g. new, new_typeArray_Java, uncommon_trap.
-      __ far_call(addr, runtime_call_Relocation::spec());
+      if (__ trampoline_call(addr, runtime_call_Relocation::spec()) == nullptr) {
+        ciEnv::current()->record_failure("CodeCache is full");
+        return;
+      }
     } else if (_method->intrinsic_id() == vmIntrinsicID::_ensureMaterializedForStackWalk) {
       // The nops keep the size of the elided call to
       // JVM_EnsureMaterializedForStackWalk.
@@ -1536,8 +1539,11 @@ encode %{
       int method_index = resolved_method_index(masm);
       RelocationHolder rspec = _optimized_virtual ? opt_virtual_call_Relocation::spec(method_index)
                                                   : static_call_Relocation::spec(method_index);
-      address call_pc = __ pc();
-      __ far_call(addr, rspec);
+      address call_pc = __ trampoline_call(addr, rspec);
+      if (call_pc == nullptr) {
+        ciEnv::current()->record_failure("CodeCache is full");
+        return;
+      }
 
       // Emit stub for static call
       address stub = CompiledDirectCall::emit_to_interp_stub(masm, call_pc);
@@ -1549,13 +1555,16 @@ encode %{
   %}
 
   // As C1's ic_call: the CompiledICData* in a movl to t1 (filled in when the
-  // nmethod is installed), then the call through its cell. The callee's UEP
-  // checks the receiver against it (MacroAssembler::ic_check).
+  // nmethod is installed), then the call. The callee's UEP checks the
+  // receiver against it (MacroAssembler::ic_check).
   enc_class ia64_enc_java_dynamic_call(method meth) %{
     int method_index = resolved_method_index(masm);
     address movl_pc = __ pc();
     __ movl(t1, (uint64_t)(uintptr_t)Universe::non_oop_word());
-    __ far_call((address)$meth$$method, virtual_call_Relocation::spec(movl_pc, method_index));
+    if (__ trampoline_call((address)$meth$$method, virtual_call_Relocation::spec(movl_pc, method_index)) == nullptr) {
+      ciEnv::current()->record_failure("CodeCache is full");
+      return;
+    }
   %}
 
   // Calls to the runtime. A target in the code cache (a stub or blob) is
@@ -1567,7 +1576,10 @@ encode %{
   enc_class ia64_enc_java_to_runtime(method meth) %{
     address entry = (address)$meth$$method;
     if (!call_through_descriptor(entry)) {
-      __ far_call(entry, runtime_call_Relocation::spec());
+      if (__ trampoline_call(entry, runtime_call_Relocation::spec()) == nullptr) {
+        ciEnv::current()->record_failure("CodeCache is full");
+        return;
+      }
     } else {
       // A fixed shape: mov ip must start the node's first bundle.
       Assembler::NoPackScope no_pack(masm);

@@ -25,6 +25,8 @@
 #include "asm/macroAssembler.hpp"
 #include "code/codeCache.hpp"
 #include "code/compiledIC.hpp"
+#include "code/nmethod.hpp"
+#include "code/relocInfo.hpp"
 #include "nativeInst_ia64.hpp"
 #include "runtime/safepoint.hpp"
 #include "runtime/atomic.hpp"
@@ -33,11 +35,15 @@
 
 // The sequences recognised here are exactly the ones MacroAssembler emits:
 //
-//   call:  br.cond L ; <cell> ; L: mov t0 = ip ; adds t0 = -16, t0 ;
-//          ld8 t0 = [t0] ; mov b6 = t0 ; br.call.sptk.many b0 = b6   (7 bundles)
-//   jump:  movl t0 = target ; mov b6 = t0 ; br.cond.sptk b6          (3 bundles)
+//   call:       br.call.sptk.many b0 = <target>                     (1 bundle)
+//   trampoline: mov t0 = ip ; adds t0 = 48, t0 ;; ld8 t0 = [t0] ;
+//               mov b6 = t0 ; br.cond.sptk b6 ; <cell>               (4 bundles)
+//   far call:   br.cond L ; <cell> ; L: mov t0 = ip ; adds t0 = -16, t0 ;
+//               ld8 t0 = [t0] ; mov b6 = t0 ; br.call.sptk.many b0 = b6
+//                                                                    (7 bundles)
+//   jump:       movl t0 = target ; mov b6 = t0 ; br.cond.sptk b6     (3 bundles)
 //
-// (MacroAssembler::far_call / far_jump.)
+// (MacroAssembler::trampoline_call, emit_trampoline_stub, far_call, far_jump.)
 
 static bool bundle_equals(address a, ia64::Bundle expected) {
   const ia64::Bundle* b = (const ia64::Bundle*)a;
@@ -82,18 +88,13 @@ bool NativeInstruction::is_safepoint_poll() {
 }
 
 bool NativeInstruction::is_call_at(address addr) {
-  return NativeCall::is_at(addr);
+  return NativeCall::is_at(addr) || NativeFarCall::is_at(addr);
 }
 
 // ---- NativeCall ---------------------------------------------------------------
 
 bool NativeCall::is_at(address addr) {
-  return bundle_equals(addr + branch_offset, ia64::BundleB(ia64::BrCondRel(2))) &&
-         bundle_equals(addr + mov_ip_offset, ia64::BundleI(ia64::MovFromIp(t0->encoding()))) &&
-         bundle_equals(addr + adds_offset, ia64::BundleM(ia64::Adds(t0->encoding(), -(int)BytesPerBundle, t0->encoding()))) &&
-         bundle_equals(addr + ld8_offset, ia64::BundleM(ia64::Ld8(t0->encoding(), t0->encoding()))) &&
-         is_mov_b6_t0_at(addr + mov_to_br_offset) &&
-         bundle_equals(addr + br_call_offset, ia64::BundleB(ia64::BrCall(breturn.encoding(), btmp.encoding())));
+  return bundle_equals(addr, bundle_for(ia64::ReadBranchDisp((const ia64::Bundle*)addr)));
 }
 
 NativeCall* nativeCall_before(address return_address) {
@@ -102,23 +103,63 @@ NativeCall* nativeCall_before(address return_address) {
   return call;
 }
 
+address NativeCall::raw_destination() const {
+  return addr_at(0) + (intptr_t)ia64::ReadBranchDisp(bundle_at(0)) * BytesPerBundle;
+}
+
 address NativeCall::destination() const {
-  return (address)Atomic::load((volatile uint64_t*)addr_at(cell_offset));
+  address dest = raw_destination();
+  if (dest == addr_at(0)) {
+    return dest;                    // not yet linked (MacroAssembler::trampoline_call)
+  }
+  CodeBlob* cb = CodeCache::find_blob(addr_at(0));
+  if (cb != nullptr && cb->is_nmethod() && cb->as_nmethod()->stub_contains(dest) &&
+      NativeCallTrampolineStub::is_at(dest)) {
+    return nativeCallTrampolineStub_at(dest)->destination();
+  }
+  return dest;
 }
 
-// The cell is data: no instruction-cache flush. The 8-byte aligned store is
-// atomic, so a thread executing the call sees either the old or the new
-// destination, never a mixture.
+// Only the upper eight bytes change (the class comment): one atomic store.
 void NativeCall::set_destination(address dest) {
-  assert(is_aligned(addr_at(cell_offset), BytesPerWord), "cell must be 8-byte aligned");
-  Atomic::store((volatile uint64_t*)addr_at(cell_offset), (uint64_t)dest);
+  assert(reachable_from_branch_at(addr_at(0), dest), "call target out of range: " PTR_FORMAT, p2i(dest));
+  ia64::Bundle b = bundle_for((int32_t)((dest - addr_at(0)) / (intptr_t)BytesPerBundle));
+  ia64::Bundle* site = bundle_at(0);
+  assert(site->lo == b.lo, "only the upper half of a call bundle may change");
+  Atomic::store(&site->hi, b.hi);
+  ICache::invalidate_range(addr_at(0), instruction_size);
 }
 
+// As aarch64: the trampoline's cell first, then the branch, so a thread
+// running the call meanwhile reaches the old destination or the new one.
 void NativeCall::set_destination_mt_safe(address dest) {
   assert(SafepointSynchronize::is_at_safepoint() || CodeCache_lock->owned_by_self() ||
          CompiledICLocker::is_safe(addr_at(0)),
          "IA-64: call patching outside a safepoint must hold the IC lock");
-  set_destination(dest);
+  address trampoline = get_trampoline();
+  if (trampoline != nullptr) {
+    assert(!NativeCallTrampolineStub::is_at(dest), "chained trampolines");
+    nativeCallTrampolineStub_at(trampoline)->set_destination(dest);
+  }
+  if (reachable_from_branch_at(addr_at(0), dest)) {
+    set_destination(dest);
+  } else {
+    guarantee(trampoline != nullptr, "IA-64: an out-of-range call needs a trampoline");
+    if (raw_destination() != trampoline) {
+      set_destination(trampoline);
+    }
+  }
+}
+
+address NativeCall::get_trampoline() {
+  CodeBlob* cb = CodeCache::find_blob(addr_at(0));
+  assert(cb != nullptr && cb->is_nmethod(), "nmethod expected");
+  nmethod* nm = cb->as_nmethod();
+  address dest = raw_destination();
+  if (nm->stub_contains(dest) && NativeCallTrampolineStub::is_at(dest)) {
+    return dest;
+  }
+  return trampoline_stub_Relocation::get_trampoline_for(addr_at(0), nm);
 }
 
 void NativeCall::verify() {
@@ -127,6 +168,56 @@ void NativeCall::verify() {
 
 void NativeCall::print() {
   tty->print_cr(PTR_FORMAT ": call " PTR_FORMAT, p2i(instruction_address()), p2i(destination()));
+}
+
+// ---- NativeCallTrampolineStub ---------------------------------------------------
+
+ia64::Bundle NativeCallTrampolineStub::code_bundle(int i) {
+  using namespace ia64;
+  const uint32_t r = t0->encoding();
+  switch (i) {
+    case 0:  return MakeBundle(tMII_, NopM(), MovFromIp(r), NopI());
+    case 1:  return MakeBundle(tM_MI_, Adds(r, data_offset, r), Ld8(r, r), NopI());
+    default: return MakeBundle(tMIB_, NopM(), MovToBr(btmp.encoding(), r), BrCond(btmp.encoding()));
+  }
+}
+
+bool NativeCallTrampolineStub::is_at(address addr) {
+  for (int i = 0; i < 3; i++) {
+    if (!bundle_equals(addr + i * BytesPerBundle, code_bundle(i))) return false;
+  }
+  return true;
+}
+
+address NativeCallTrampolineStub::destination() const {
+  return (address)Atomic::load((volatile uint64_t*)addr_at(data_offset));
+}
+
+void NativeCallTrampolineStub::set_destination(address dest) {
+  Atomic::release_store((volatile uint64_t*)addr_at(data_offset), (uint64_t)dest);
+}
+
+// ---- NativeFarCall --------------------------------------------------------------
+
+bool NativeFarCall::is_at(address addr) {
+  return bundle_equals(addr + branch_offset, ia64::BundleB(ia64::BrCondRel(2))) &&
+         bundle_equals(addr + mov_ip_offset, ia64::BundleI(ia64::MovFromIp(t0->encoding()))) &&
+         bundle_equals(addr + adds_offset, ia64::BundleM(ia64::Adds(t0->encoding(), -(int)BytesPerBundle, t0->encoding()))) &&
+         bundle_equals(addr + ld8_offset, ia64::BundleM(ia64::Ld8(t0->encoding(), t0->encoding()))) &&
+         is_mov_b6_t0_at(addr + mov_to_br_offset) &&
+         bundle_equals(addr + br_call_offset, ia64::BundleB(ia64::BrCall(breturn.encoding(), btmp.encoding())));
+}
+
+address NativeFarCall::destination() const {
+  return (address)Atomic::load((volatile uint64_t*)addr_at(cell_offset));
+}
+
+// The cell is data: no instruction-cache flush. The 8-byte aligned store is
+// atomic, so a thread executing the call sees either the old or the new
+// destination, never a mixture.
+void NativeFarCall::set_destination(address dest) {
+  assert(is_aligned(addr_at(cell_offset), BytesPerWord), "cell must be 8-byte aligned");
+  Atomic::store((volatile uint64_t*)addr_at(cell_offset), (uint64_t)dest);
 }
 
 // ---- NativeMovConstReg ----------------------------------------------------------

@@ -273,6 +273,20 @@ class MacroAssembler : public Assembler {
   // call). These are the sequences NativeCall / NativeJump describe.
   void far_call(address entry, PredicateRegister qp = pTrue);
   void far_call(address entry, const RelocationHolder& rspec);
+
+  // A Java call, or C2's call into a runtime stub, with its relocation: one
+  // IP-relative br.call (NativeCall), plus a trampoline in the stub section
+  // when the code cache is larger than a branch reaches (aarch64's scheme).
+  // Returns the call's address, or nullptr if the stub section could not
+  // grow (the code cache is full). Clobbers t0 and b6 if it goes through
+  // the trampoline, and b0.
+  address trampoline_call(address entry, const RelocationHolder& rspec);
+  address emit_trampoline_stub(int insts_call_instruction_offset, address dest);
+  static int max_trampoline_stub_size();
+  // Whether some code-cache address may be out of a branch's reach.
+  static bool far_branches();
+  // C2_MacroAssembler: true while C2 measures node sizes in a scratch buffer.
+  virtual bool in_scratch_emit_size() { return false; }
   void emit_static_call_stub();
   static int static_call_stub_size();
   void far_jump(address entry, PredicateRegister qp = pTrue);

@@ -29,6 +29,8 @@
 // C2_MacroAssembler contains high-level macros for C2
 
  public:
+  virtual bool in_scratch_emit_size() override;
+
   // ---- memory access (C2-DESIGN.md section 5) -------------------------------
   //
   // The access kinds an .ad memory node emits.

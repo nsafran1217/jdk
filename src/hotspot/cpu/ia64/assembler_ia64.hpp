@@ -1064,6 +1064,13 @@ class Assembler : public AbstractAssembler {
     address dest = target(L);
     emit_b(ia64::BrCallRel(b1.encoding(), bundle_disp(dest), Q));
   }
+  // br.call b0 = <bundle_disp> alone in its MIB bundle: NativeCall's shape
+  // (MacroAssembler::trampoline_call).
+  void br_call_rel(int32_t bundle_disp) {
+    _branch_reg_epoch++;
+    close_bundle();
+    emit_b(ia64::BrCallRel(breturn.encoding(), bundle_disp));
+  }
   // An unconditional jump is just a branch on p0.
   void br(Label& L) { br_cond(L); }
 

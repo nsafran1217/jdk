@@ -33,8 +33,8 @@
 
 // Static and opt-virtual calls from compiled code (FRAME-DESIGN.md 11.2).
 //
-// The call site is a NativeCall (cell form). Its to-interpreter stub, in the
-// stub section, is
+// The call site is a NativeCall (an IP-relative br.call, through a trampoline
+// if out of range). Its to-interpreter stub, in the stub section, is
 //
 //     movl Rmethod = <Method*>       NativeMovConstReg, 0 while clean
 //     movl t0 = <c2i entry>          \
@@ -43,7 +43,7 @@
 //
 // The stub's two movl immediates are rewritten non-atomically, which is safe
 // only because the stub is unreachable while it is being filled in: the call
-// site's cell is repointed to the stub afterwards (set_to_interpreted), and
+// site is repointed to the stub afterwards (set_to_interpreted), and
 // cleaned stubs are not reachable from any call site (set_stub_to_clean runs
 // with the IC lock held after the call has been redirected).
 
@@ -76,9 +76,8 @@ int CompiledDirectCall::to_interp_stub_size() {
   return MacroAssembler::static_call_stub_size();
 }
 
-// Calls never need trampolines: a NativeCall reaches any address.
 int CompiledDirectCall::to_trampoline_stub_size() {
-  return 0;
+  return MacroAssembler::max_trampoline_stub_size();
 }
 
 // Relocation entries for a call to the interpreter: the static_stub relocation
@@ -104,7 +103,7 @@ void CompiledDirectCall::set_to_interpreted(const methodHandle& callee, address 
   jump->set_jump_destination(entry);
   ICache::invalidate_range(stub, to_interp_stub_size());
 
-  // Update the call site's cell to the stub.
+  // Repoint the call site to the stub (in range: the same nmethod).
   set_destination_mt_safe(stub);
 }
 

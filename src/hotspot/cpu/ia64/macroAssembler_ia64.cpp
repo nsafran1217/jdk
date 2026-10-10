@@ -35,6 +35,8 @@
 #include "runtime/javaThread.hpp"
 #include "runtime/jniHandles.hpp"
 #include "code/compiledIC.hpp"
+#include "code/nativeInst.hpp"
+#include "code/relocInfo.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/stubRoutines.hpp"
 #include "utilities/globalDefinitions.hpp"
@@ -199,6 +201,69 @@ void MacroAssembler::far_call(address entry, PredicateRegister qp) {
 void MacroAssembler::far_call(address entry, const RelocationHolder& rspec) {
   relocate(rspec);
   far_call(entry);
+}
+
+address MacroAssembler::trampoline_call(address entry, const RelocationHolder& rspec) {
+  assert(rspec.type() == relocInfo::runtime_call_type ||
+         rspec.type() == relocInfo::opt_virtual_call_type ||
+         rspec.type() == relocInfo::static_call_type ||
+         rspec.type() == relocInfo::virtual_call_type, "wrong reloc type");
+  assert(entry != nullptr, "trampoline_call to null");
+  address call_pc = pc();                 // closes the open bundle
+  int call_offset = offset();
+  int32_t disp;
+  if (far_branches()) {
+    // Branch to itself until the nmethod is in place: pd_fix_owner_after_move
+    // then points it at entry, or at the trampoline if entry is out of range.
+    // C2's scratch emission only measures, and needs no trampoline.
+    if (!in_scratch_emit_size()) {
+      if (emit_trampoline_stub(call_offset, entry) == nullptr) {
+        return nullptr;
+      }
+    }
+    disp = 0;
+  } else {
+    // The whole code cache is within reach, and the code is generated in it
+    // (CallRelocation::fix_relocation_after_move redoes the displacement
+    // when it is copied).
+    assert(NativeCall::reachable_from_branch_at(call_pc, entry), "out of range");
+    disp = (int32_t)((entry - call_pc) / (intptr_t)BytesPerBundle);
+  }
+  assert(pc() == call_pc, "the call must start where it was recorded");
+  relocate(rspec);
+  br_call_rel(disp);
+  return call_pc;
+}
+
+address MacroAssembler::emit_trampoline_stub(int insts_call_instruction_offset, address dest) {
+  address stub = start_a_stub(max_trampoline_stub_size());
+  if (stub == nullptr) {
+    return nullptr;                       // CodeBuffer::expand failed
+  }
+  // Relates this trampoline to the call at insts_call_instruction_offset.
+  relocate(trampoline_stub_Relocation::spec(code()->insts()->start() + insts_call_instruction_offset));
+  int start = offset();
+  {
+    NoPackScope no_pack(this);            // a fixed shape: NativeCallTrampolineStub
+    for (int i = 0; i < 3; i++) {
+      emit_bundle(NativeCallTrampolineStub::code_bundle(i));
+    }
+    emit_int64((int64_t)dest);
+    emit_int64(0);
+  }
+  assert(offset() - start == NativeCallTrampolineStub::instruction_size, "trampoline size");
+  address stub_start = addr_at(start);
+  assert(NativeCallTrampolineStub::is_at(stub_start), "doesn't look like a trampoline");
+  end_a_stub();
+  return stub_start;
+}
+
+bool MacroAssembler::far_branches() {
+  return ReservedCodeCacheSize >= (size_t)ia64::MaxBranchBundleDisp * BytesPerBundle;
+}
+
+int MacroAssembler::max_trampoline_stub_size() {
+  return NativeCallTrampolineStub::instruction_size;
 }
 
 int MacroAssembler::ic_check_size() {

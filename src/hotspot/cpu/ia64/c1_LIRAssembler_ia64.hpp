@@ -89,7 +89,9 @@ private:
   // Sizes in bytes; every IA-64 instruction is a 16-byte bundle, a movl one
   // bundle too.
   enum {
-    // static call stub: movl Rmethod; movl t0; mov b6 = t0; br b6
+    // Per call: the static call stub (movl Rmethod; movl t0; mov b6 = t0;
+    // br b6) and the trampoline (MacroAssembler::emit_trampoline_stub), four
+    // bundles each.
     _call_stub_size = 8 * BytesPerBundle,
     // See emit_exception_handler for detail
     _exception_handler_size = DEBUG_ONLY(64) NOT_DEBUG(16) * BytesPerBundle,

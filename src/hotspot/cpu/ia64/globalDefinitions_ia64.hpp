@@ -65,6 +65,10 @@ const bool CCallingConventionRequiresIntsAsLongs = true;
 
 #define SUPPORT_RESERVED_STACK_AREA
 
+// Out-of-range calls go through trampolines, linked once the nmethod is in
+// place (trampoline_stub_Relocation::pd_fix_owner_after_move).
+#define USE_TRAMPOLINE_STUB_FIX_OWNER
+
 // register_ia64.hpp uses the all_RegisterImpls array form (as cpu/riscv does).
 #define USE_POINTERS_TO_REGISTER_IMPL_ARRAY
 

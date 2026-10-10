@@ -311,7 +311,10 @@ void ArrayCopyStub::emit_code(LIR_Assembler* ce) {
   if (ce->compilation()->bailed_out()) {
     return; // CodeCache is full
   }
-  __ far_call(SharedRuntime::get_resolve_static_call_stub(), static_call_Relocation::spec());
+  if (__ trampoline_call(SharedRuntime::get_resolve_static_call_stub(), static_call_Relocation::spec()) == nullptr) {
+    ce->bailout("trampoline stub overflow");
+    return;
+  }
   ce->add_call_info_here(info());
   __ set_poll_word_register();       // a Java call: the callee may be interpreted
 

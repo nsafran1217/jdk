@@ -659,6 +659,14 @@ inline void PatchBranchDisp(Bundle* b, int32_t bundleDisp) {
   b->hi = (b->hi & ((uint64_t(1) << 23) - 1)) | (slot2 << 23);
 }
 
+// The IP-relative displacement (in bundles) of the branch in slot 2 of |b|.
+inline int32_t ReadBranchDisp(const Bundle* b) {
+  const uint64_t kSlotMask = (uint64_t(1) << 41) - 1;
+  Insn slot2 = (b->hi >> 23) & kSlotMask;
+  uint32_t u = uint32_t((slot2 >> 13) & 0xfffff) | (uint32_t((slot2 >> 36) & 1) << 20);
+  return int32_t(u << 11) >> 11;          // sign-extend 21 bits
+}
+
 // Toggle a lone B-slot bundle between a real branch/call (op 4/5) and a nop
 // (op 2), in place. op sits in the same 4 high bits for all three, well clear
 // of the tgt25c payload and qp, so flipping just those bits round-trips cleanly

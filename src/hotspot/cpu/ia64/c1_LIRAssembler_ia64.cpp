@@ -1690,8 +1690,8 @@ void LIR_Assembler::shift_op(LIR_Code code, LIR_Opr left, jint count, LIR_Opr de
 // ---- calls --------------------------------------------------------------------
 
 void LIR_Assembler::align_call(LIR_Code code) {
-  // Every IA-64 instruction is a bundle, and a call's destination lives in
-  // an aligned data cell (MacroAssembler::far_call): nothing to align.
+  // Every IA-64 instruction is a bundle, and a call is one bundle
+  // (MacroAssembler::trampoline_call): nothing to align.
 }
 
 void LIR_Assembler::call(LIR_OpJavaCall* op, relocInfo::relocType rtype) {
@@ -1701,19 +1701,25 @@ void LIR_Assembler::call(LIR_OpJavaCall* op, relocInfo::relocType rtype) {
     case relocInfo::opt_virtual_call_type: rspec = opt_virtual_call_Relocation::spec(); break;
     default: ShouldNotReachHere();
   }
-  __ far_call(op->addr(), rspec);
+  if (__ trampoline_call(op->addr(), rspec) == nullptr) {
+    bailout("trampoline stub overflow");
+    return;
+  }
   add_call_info(code_offset(), op->info());
   __ set_poll_word_register();
 }
 
 // The inline cache: the CompiledICData* in a movl to t1 (nmethod::
-// finalize_relocations fills it in before the nmethod is published), the
-// call through its cell. The callee's UEP checks the receiver against it
+// finalize_relocations fills it in before the nmethod is published), then
+// the call. The callee's UEP checks the receiver against it
 // (MacroAssembler::ic_check).
 void LIR_Assembler::ic_call(LIR_OpJavaCall* op) {
   address movl_pc = __ pc();
   __ movl(t1, (uint64_t)(uintptr_t)Universe::non_oop_word());
-  __ far_call(op->addr(), virtual_call_Relocation::spec(movl_pc));
+  if (__ trampoline_call(op->addr(), virtual_call_Relocation::spec(movl_pc)) == nullptr) {
+    bailout("trampoline stub overflow");
+    return;
+  }
   add_call_info(code_offset(), op->info());
   __ set_poll_word_register();
 }

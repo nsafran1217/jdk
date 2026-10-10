@@ -46,8 +46,9 @@
 //    getting this wrong produces a machine that keeps executing the old
 //    instruction. Instruction patches are also not atomic against concurrent
 //    execution (a movl immediate spans both halves of its bundle), which is
-//    why globalDefinitions_ia64.hpp defines DEOPTIMIZE_WHEN_PATCHING and why
-//    call sites keep their destination in a data cell instead (NativeCall).
+//    why globalDefinitions_ia64.hpp defines DEOPTIMIZE_WHEN_PATCHING, and why
+//    a call is repointed only through the upper eight bytes of its bundle
+//    (NativeCall) or a data cell (NativeFarCall, NativeCallTrampolineStub).
 
 class NativeCall;
 
@@ -99,7 +100,103 @@ inline NativeInstruction* nativeInstruction_at(address addr) {
 NativeCall* nativeCall_at(address addr);
 NativeCall* nativeCall_before(address return_address);
 
-// A call site: MacroAssembler::far_call's cell form (FRAME-DESIGN.md 11.2).
+// A Java call site (and C2's calls into runtime stubs): one bundle,
+//
+//     { nop.m ; nop.i ; br.call.sptk.many b0 = <target> ;; }   (MIB)
+//
+// with an IP-relative target, +/-16 MiB in bundles. A direct call is
+// predicted by the front end; an indirect br.call through b6 is predicted
+// from b6's value when it is fetched, i.e. right only if the previous write
+// of b6 was for this same call (FINDINGS, "Indirect branch prediction"). A
+// target out of range goes through a trampoline in the nmethod's stub section
+// (NativeCallTrampolineStub, as on aarch64).
+//
+// The branch lies wholly in slot 2, i.e. in the bundle's upper eight bytes
+// (with the high bits of slot 1, a fixed nop.i), so repointing it is one
+// aligned 8-byte store: a thread fetching the bundle sees the old call or
+// the new one, never a mixture. The instruction cache is flushed after.
+class NativeCall : private NativeInstruction {
+ public:
+  enum {
+    instruction_size            = BytesPerBundle,
+    return_address_offset       = BytesPerBundle,
+    displacement_offset         = 0
+  };
+
+  // C2's output (output.cpp) pads before calls by this much.
+  static int byte_size() { return instruction_size; }
+
+  address instruction_address() const { return addr_at(0); }
+  address next_instruction_address() const { return addr_at(instruction_size); }
+  address return_address() const { return addr_at(return_address_offset); }
+
+  // The branch's own target: the destination or a trampoline.
+  address raw_destination() const;
+  // The destination, looking through a trampoline.
+  address destination() const;
+  // Point the branch itself at dest, which must be in range.
+  void set_destination(address dest);
+  // Repoint while other threads may execute the call (CompiledIC).
+  void set_destination_mt_safe(address dest);
+  // This call's trampoline stub, or nullptr.
+  address get_trampoline();
+
+  void verify_alignment() {
+    assert(is_aligned(addr_at(0), BytesPerBundle), "call must be bundle-aligned");
+  }
+  void verify();
+  void print();
+
+  static bool reachable_from_branch_at(address branch, address target) {
+    intptr_t disp = (target - branch) / (intptr_t)BytesPerBundle;
+    return disp >= ia64::MinBranchBundleDisp && disp <= ia64::MaxBranchBundleDisp;
+  }
+  static ia64::Bundle bundle_for(int32_t bundle_disp) {
+    return ia64::BundleB(ia64::BrCallRel(breturn.encoding(), bundle_disp));
+  }
+
+  static bool is_at(address addr);
+  static bool is_call_before(address return_address) {
+    return is_at(return_address - return_address_offset);
+  }
+};
+
+inline NativeCall* nativeCall_at(address addr) {
+  return (NativeCall*)addr;
+}
+
+// The trampoline of an out-of-range call, in the stub section:
+//
+//     { nop.m ; mov t0 = ip ; nop.i ;; }
+//     { adds t0 = 32, t0 ;; ld8 t0 = [t0] ; nop.i ;; }          (M;MI)
+//     { nop.m ; mov b6 = t0 ; br.cond.sptk b6 ;; }
+//     <8-byte destination, 8 bytes padding>
+//
+// Reached by the call's br.call, so b0 already holds the call's return
+// address. The destination is data, written with one aligned 8-byte store.
+class NativeCallTrampolineStub : private NativeInstruction {
+ public:
+  enum {
+    instruction_size = 4 * BytesPerBundle,
+    data_offset      = 3 * BytesPerBundle
+  };
+
+  address destination() const;
+  void set_destination(address dest);
+
+  // Bundle i (0-2) of the code (MacroAssembler::emit_trampoline_stub).
+  static ia64::Bundle code_bundle(int i);
+  static bool is_at(address addr);
+};
+
+inline NativeCallTrampolineStub* nativeCallTrampolineStub_at(address addr) {
+  assert(NativeCallTrampolineStub::is_at(addr), "no call trampoline at " PTR_FORMAT, p2i(addr));
+  return (NativeCallTrampolineStub*)addr;
+}
+
+// A call to an arbitrary address: MacroAssembler::far_call's cell form
+// (FRAME-DESIGN.md 11.2), used where no relocation repoints the call (stubs,
+// C1's slow paths).
 //
 //     br.cond.sptk L               bundle 0
 //     <destination cell>           bundle 1 (8-byte destination + padding)
@@ -110,9 +207,8 @@ NativeCall* nativeCall_before(address return_address);
 //     br.call.sptk.many b0 = b6    bundle 6
 //
 // Seven bundles. destination()/set_destination() read and write the cell with
-// one aligned 8-byte access, which is what makes set_destination_mt_safe
-// genuinely safe against concurrent execution.
-class NativeCall : private NativeInstruction {
+// one aligned 8-byte access.
+class NativeFarCall : private NativeInstruction {
  private:
   enum {
     branch_offset    = 0,
@@ -128,35 +224,17 @@ class NativeCall : private NativeInstruction {
  public:
   enum {
     instruction_size            = call_size,
-    return_address_offset       = call_size,
-    displacement_offset         = cell_offset
+    return_address_offset       = call_size
   };
-
-  // C2's output (output.cpp) pads before calls by this much.
-  static int byte_size() { return instruction_size; }
-
-  address instruction_address() const { return addr_at(0); }
-  address next_instruction_address() const { return addr_at(call_size); }
-  address return_address() const { return addr_at(call_size); }
 
   address destination() const;
   void set_destination(address dest);
-  void set_destination_mt_safe(address dest);
-
-  void verify_alignment() {
-    assert(is_aligned(addr_at(0), BytesPerBundle), "call must be bundle-aligned");
-  }
-  void verify();
-  void print();
 
   static bool is_at(address addr);
-  static bool is_call_before(address return_address) {
-    return is_at(return_address - call_size);
-  }
 };
 
-inline NativeCall* nativeCall_at(address addr) {
-  return (NativeCall*)addr;
+inline NativeFarCall* nativeFarCall_at(address addr) {
+  return (NativeFarCall*)addr;
 }
 
 // A movl that materialises a constant -- an oop, a Metadata*, or any absolute
