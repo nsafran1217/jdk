@@ -603,8 +603,11 @@ inline Insn BrRet(uint32_t b2, uint32_t qp = 0) {
 
 // B5: br.call.sptk.many b1 = b2 -- indirect call, return address into b1.
 // Clobbers b0 and ar.pfs; both are saved to memory by call_stub.
-inline Insn BrCall(uint32_t b1, uint32_t b2, uint32_t qp = 0) {
-  return fOp(1) | fPa(1) | fWhc(1) | fD(0) | fB1(b1) | fB2(b2) | fQp(qp);
+// The indirect whether hint (wh, bits 34:32): 1 .sptk, 3 .spnt, 5 .dptk,
+// 7 .dpnt.
+enum IndirectBranchHint : uint32_t { kIndSptk = 1, kIndSpnt = 3, kIndDptk = 5, kIndDpnt = 7 };
+inline Insn BrCall(uint32_t b1, uint32_t b2, uint32_t qp = 0, uint32_t wh = kIndSptk) {
+  return fOp(1) | fPa(1) | fWhc(wh) | fD(0) | fB1(b1) | fB2(b2) | fQp(qp);
 }
 
 // IP-relative displacements (TGT25c) are measured in whole 16-byte bundles and
@@ -1034,7 +1037,9 @@ inline Insn NopB(uint32_t imm21 = 0) {
 // reach only +/-16 MiB, so every absolute address is materialised here.
 // ---------------------------------------------------------------------------
 
-inline Bundle MovlBundle(uint32_t r1, uint64_t imm, uint32_t qp = 0) {
+// A movl in an MLX bundle whose slot 0 holds the M-unit instruction s0
+// (template tmpl: tMLX or tMLX_).
+inline Bundle MovlBundleWith(Insn s0, uint32_t r1, uint64_t imm, uint32_t qp = 0, Template tmpl = tMLX_) {
   Insn l = Insn((imm >> 22) & ((uint64_t(1) << 41) - 1));
 
   Insn x = fOp(6) | fR1(r1) | fQp(qp);
@@ -1044,8 +1049,22 @@ inline Bundle MovlBundle(uint32_t r1, uint64_t imm, uint32_t qp = 0) {
   x |= Insn((imm >> 21) & 0x1) << 21;    // ic
   x |= Insn((imm >> 63) & 0x1) << 36;    // i
 
+  return MakeBundle(tmpl, s0, l, x);
+}
+
+inline Bundle MovlBundle(uint32_t r1, uint64_t imm, uint32_t qp = 0) {
   // Slot 0 of an MLX bundle is an M slot; pad it with an M nop.
-  return MakeBundle(tMLX_, NopM(), l, x);
+  return MovlBundleWith(NopM(), r1, imm, qp, tMLX_);
+}
+
+// X5: nop.x imm62, as an MLX bundle with s0 in slot 0. The L slot is all
+// immediate (imm62 bits 61:21) and the X slot's qp and imm20b are don't-cares
+// for a nop, so bundle bytes 8-11 (bits 95:64: L-slot bits 40:18, X-slot bits
+// 8:0) may hold any 32-bit value and the bundle still executes as s0 alone.
+// The nmethod entry barrier keeps its guard there (barrierSetAssembler_ia64.cpp).
+// The X-slot pattern is nop.m's (x6 = 1 at bits 32:27).
+inline Bundle NopXBundle(Insn s0, Template tmpl = tMLX_) {
+  return MakeBundle(tmpl, s0, 0, NopM());
 }
 
 // Read back the immediate a movl bundle carries. Used by nativeInst to inspect

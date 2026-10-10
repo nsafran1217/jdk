@@ -301,6 +301,7 @@ class MacroAssembler : public Assembler {
   // leave() undoes it and leaves the return address in b0, ready for ret().
   void enter();
   void leave();
+  void build_frame_linkage(int framesize);
 
   static int enter_frame_words() { return 4; }   // linkage + psABI scratch
 

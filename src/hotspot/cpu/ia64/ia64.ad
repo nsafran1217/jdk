@@ -907,16 +907,8 @@ void MachPrologNode::emit(C2_MacroAssembler* masm, PhaseRegAlloc* ra_) const {
     __ generate_stack_overflow_check(bangsize);
   }
 
-  // As C1_MacroAssembler::build_frame. sp moves before anything is stored
-  // below it: there is no red zone. t2/t3 are free at a method entry.
-  __ mov_from_br(t2, breturn);
-  __ mov(t3, sp);                                 // the new fp
-  __ add_imm(sp, sp, -framesize);
-  __ adds(t1, frame::return_addr_offset * wordSize, t3);
-  __ Assembler::st8(t1, t2);
-  __ adds(t1, frame::link_offset * wordSize, t3);
-  __ Assembler::st8(t1, fp);
-  __ mov(fp, t3);
+  // As C1_MacroAssembler::build_frame.
+  __ build_frame_linkage(framesize);
 
   if (C->stub_function() == nullptr) {
     // Must end the prologue: BarrierSetNMethod finds the guard at a fixed

@@ -229,7 +229,7 @@ void C1_MacroAssembler::allocate_array(Register obj, Register len, Register tmp1
 // caller's sp, fp = the caller's sp, and sp lowered by framesize, whose
 // bottom 16 bytes are the psABI scratch area (FrameMap::
 // first_available_sp_in_frame). sp moves before anything is stored below
-// it: there is no red zone. t2/t3 are free at a method entry.
+// it: there is no red zone (MacroAssembler::build_frame_linkage).
 void C1_MacroAssembler::set_poll_word_register() {
   if (UsePollWordRegister) {
     adds(Rpoll_word, in_bytes(JavaThread::polling_word_offset()), Rthread);
@@ -243,14 +243,7 @@ void C1_MacroAssembler::build_frame(int framesize, int bang_size_in_bytes) {
   // Note that we do this before creating a frame.
   generate_stack_overflow_check(bang_size_in_bytes);
 
-  mov_from_br(t2, breturn);
-  mov(t3, sp);                                   // the new fp
-  add_imm(sp, sp, -framesize);
-  adds(t1, frame::return_addr_offset * wordSize, t3);
-  Assembler::st8(t1, t2);
-  adds(t1, frame::link_offset * wordSize, t3);
-  Assembler::st8(t1, fp);
-  mov(fp, t3);
+  build_frame_linkage(framesize);
 
   // Before the entry barrier, which must end the prologue: BarrierSetNMethod
   // finds its guard at a fixed distance before the frame-complete offset.

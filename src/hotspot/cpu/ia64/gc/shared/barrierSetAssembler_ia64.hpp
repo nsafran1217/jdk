@@ -75,8 +75,8 @@ public:
 
   // Size of the nmethod entry barrier in bytes, and the guard's offset in it
   // (barrierSetAssembler_ia64.cpp).
-  static const int entry_barrier_size = 16 * BytesPerBundle;
-  static const int entry_barrier_guard_offset = BytesPerBundle;
+  static const int entry_barrier_size = 5 * BytesPerBundle;
+  static const int entry_barrier_guard_offset = 3 * BytesPerBundle + 8;
   virtual void nmethod_entry_barrier(MacroAssembler* masm);
   virtual void c2i_entry_barrier(MacroAssembler* masm);
 

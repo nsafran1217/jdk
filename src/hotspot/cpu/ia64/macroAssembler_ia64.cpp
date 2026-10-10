@@ -294,14 +294,33 @@ void MacroAssembler::enter() {
 }
 
 void MacroAssembler::leave() {
-  // Load the linkage while it is still covered by sp, then pop.
-  adds(t1, frame::return_addr_offset * wordSize, fp);
-  Assembler::ld8(t0, t1);                               // return address
+  // Load the linkage while it is still covered by sp, then pop. Three
+  // instruction groups when packed: both addresses, both loads, the moves.
+  adds(t0, frame::return_addr_offset * wordSize, fp);
   adds(t1, frame::link_offset * wordSize, fp);
+  Assembler::ld8(t0, t0);                               // return address
   Assembler::ld8(t1, t1);                               // caller's fp
   mov(sp, fp);
   mov(fp, t1);
   mov_to_br(breturn, t0);
+}
+
+// The compiled frame's linkage (FRAME-DESIGN.md 4.5, 11.4), as C1's
+// build_frame and C2's prolog lay it out: return address and the caller's
+// fp in the two words below the caller's sp, fp = the caller's sp, sp
+// lowered by framesize. sp moves before anything is stored below it: there
+// is no red zone. Uses t0-t4, which are free at a method entry. Both slot
+// addresses come from the old sp, so packed this is two or three groups
+// (sp and the addresses; the stores; no two stores share a group).
+void MacroAssembler::build_frame_linkage(int framesize) {
+  mov_from_br(t2, breturn);
+  adds(t1, frame::return_addr_offset * wordSize, sp);
+  adds(t4, frame::link_offset * wordSize, sp);
+  mov(t3, sp);                                          // the new fp
+  add_imm(sp, sp, -framesize, t0);
+  Assembler::st8(t1, t2);
+  Assembler::st8(t4, fp);
+  mov(fp, t3);
 }
 
 // ---- the thread's frame anchor ----------------------------------------------

@@ -145,6 +145,26 @@ void BarrierSetAssembler::tlab_allocate(MacroAssembler* masm, Register obj,
 // (patched by the disarming thread before its release store of the guard)
 // are ordered after it: conc_data_patch semantics. t0, t1 and p6/p7 are free
 // at a method entry; the stub preserves everything else.
+// Five hand-bundled bundles, four instruction groups, no taken branch:
+//
+//  B0  { adds t1 = disarmed_off, Rthread ; movl t2 = method_entry_barrier }
+//  B1  { nop.m ; mov t0 = ip ; nop.i ;; }
+//  B2  { ld4 t1 = [t1] ; adds t0 = guard - B1, t0 ; mov b7 = t2 ;; }
+//  B3  { ld4.acq t0 = [t0] ; nop.x <guard> ;; }
+//  B4  { cmp4.ne p6, p7 = t0, t1 ; nop.i ; (p6) br.call.spnt b0 = b7 ;; }
+//
+// The guard is bytes 8-11 of B3, inside nop.x's immediate (NopXBundle), so
+// the bundle executes the same whatever the guard holds and nothing has to
+// jump over it; the instruction cache never needs to see a new value. The
+// slow path is a predicated call that returns to frame-complete. The stub's
+// address is absolute, so the movl stays right when the code moves.
+//
+// The call goes through b7, not b6: Itanium 2 predicts an indirect branch
+// from the branch register's value when it is fetched, so a caller's
+// `br.call b6` is predicted right only while b6 still holds that call's
+// target. Writing b6 here made every call into a compiled method mispredict
+// (measured, rx2800: one wrong-target indirect branch per call). b7 is the
+// interpreter's dispatch register, which it never trusts across a call.
 void BarrierSetAssembler::nmethod_entry_barrier(MacroAssembler* masm) {
   BarrierSetNMethod* bs_nm = BarrierSet::barrier_set()->barrier_set_nmethod();
   if (bs_nm == nullptr) {
@@ -152,21 +172,18 @@ void BarrierSetAssembler::nmethod_entry_barrier(MacroAssembler* masm) {
   }
   Assembler::NoPackScope no_pack(masm);   // fixed length: BarrierSetNMethod finds the guard
   int start = __ offset();
-  Label over, skip;
-  __ br(over);
-  __ emit_int32(0);       // the guard; armed or disarmed at installation
-  __ emit_int32(0);
-  __ emit_int64(0);
-  __ bind(over);
-  __ mov_from_ip(t0);
-  __ adds(t0, -(int)BytesPerBundle, t0);
-  __ ld4_acq(t0, t0);
-  __ adds(t1, in_bytes(bs_nm->thread_disarmed_guard_value_offset()), Rthread);
-  __ Assembler::ld4(t1, t1);
-  __ cmp4_eq(ptmp0, ptmp1, t0, t1);
-  __ br_cond(skip, ptmp0);
-  __ far_call(StubRoutines::method_entry_barrier());
-  __ bind(skip);
+  using namespace ia64;
+  const int disarmed = in_bytes(bs_nm->thread_disarmed_guard_value_offset());
+  const int guard_from_b1 = entry_barrier_guard_offset - BytesPerBundle;
+  __ emit_bundle(MovlBundleWith(Adds(t1->encoding(), disarmed, Rthread->encoding()),
+                                t2->encoding(), (uint64_t)StubRoutines::method_entry_barrier(), 0, tMLX));
+  __ emit_bundle(MakeBundle(tMII_, NopM(), MovFromIp(t0->encoding()), NopI()));
+  __ emit_bundle(MakeBundle(tMMI_, Ld4(t1->encoding(), t1->encoding()),
+                            Adds(t0->encoding(), guard_from_b1, t0->encoding()),
+                            MovToBr(b7.encoding(), t2->encoding())));
+  __ emit_bundle(NopXBundle(Ld4Acq(t0->encoding(), t0->encoding()), tMLX_));
+  __ emit_bundle(MakeBundle(tMIB_, Cmp4Ne(ptmp0.encoding(), ptmp1.encoding(), t0->encoding(), t1->encoding()),
+                            NopI(), BrCall(breturn.encoding(), b7.encoding(), ptmp0.encoding(), kIndSpnt)));
   assert(__ offset() - start == entry_barrier_size, "entry_barrier_size is wrong");
 }
 
