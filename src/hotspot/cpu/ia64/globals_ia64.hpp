@@ -101,7 +101,7 @@ define_pd_global(bool, RewriteFrequentPairs, true);
 // every prologue (FRAME-DESIGN.md section 4.2) rather than through a register.
 define_pd_global(bool, PreserveFramePointer, false);
 
-define_pd_global(uintx, TypeProfileLevel, 0);
+define_pd_global(uintx, TypeProfileLevel, 111);
 
 define_pd_global(bool, CompactStrings, true);
 

@@ -75,6 +75,15 @@ private:
   void profile_object(ciMethodData* md, ciProfileData* data, Register obj,
                       Register k_RInfo, Register klass_RInfo, Label* obj_is_null);
 
+  // emit_profile_type sub functions (mdo: the type entry's address)
+  void check_conflict(ciKlass* exact_klass, intptr_t current_klass, Register tmp,
+                      Label &next, Label &none, Register mdo);
+  void check_no_conflict(ciKlass* exact_klass, intptr_t current_klass, Register tmp,
+                         Register mdo, Label &next);
+  void check_exact_klass(Register tmp, ciKlass* exact_klass);
+  void check_null(Register tmp, Label &update, intptr_t current_klass,
+                  Register mdo, bool do_update, Label &next);
+
   void deoptimize_trap(CodeEmitInfo *info);
 
   // Sizes in bytes; every IA-64 instruction is a 16-byte bundle, a movl one

@@ -306,6 +306,10 @@ address TemplateInterpreterGenerator::generate_return_entry_for(TosState state, 
   __ restore_constant_pool_cache();
   __ get_method(Rmethod);
 
+  if (state == atos) {
+    __ profile_return_type(Rtmp1, Rtos, Rtmp2);
+  }
+
   const Register cache = Rtmp1;
   const Register index = Rtmp2;
 
@@ -1229,6 +1233,10 @@ address TemplateInterpreterGenerator::generate_normal_entry(bool synchronized) {
                                               in_bytes(JavaThread::do_not_unlock_if_synchronized_offset()));
   __ mov_immediate(t2, 1);
   __ st1(do_not_unlock_if_synchronized, t2);
+
+  if (ProfileInterpreter && MethodData::profile_parameters()) {
+    __ profile_parameters_type(Rtos, Rtmp1, Rtmp2, Rtmp3);
+  }
 
   // increment invocation count & check for overflow
   Label invocation_counter_overflow;

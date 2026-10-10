@@ -1291,24 +1291,275 @@ void InterpreterMacroAssembler::profile_switch_case(Register index, Register mdp
   }
 }
 
-// Argument, return and parameter type profiling (TypeProfileLevel > 0) is
-// not ported yet: TypeProfileLevel is 0 on IA-64 (globals_ia64.hpp), so
-// MethodData has no type entries and these are never needed.
-#define IA64_NO_TYPE_PROFILING() \
-  guarantee(TypeProfileLevel == 0, "IA-64: argument/return/parameter type profiling not implemented")
+// ---- argument, return and parameter type profiling (TypeProfileLevel) -----------
+//
+// After riscv. Type entries hold a Klass* with two flag bits (null_seen,
+// type_unknown) in its low bits.
 
-void InterpreterMacroAssembler::profile_obj_type(Register obj, const Address& mdo_addr, Register tmp) { IA64_NO_TYPE_PROFILING(); }
+// [a] |= bits (a small immediate), through t0 and tmp.
+static void or_type_entry(InterpreterMacroAssembler* masm, const Address& a, int bits, Register tmp) {
+  masm->lea(t0, a);
+  masm->Assembler::ld8(tmp, t0);
+  masm->Assembler::or_imm(tmp, bits, tmp);
+  masm->Assembler::st8(t0, tmp);
+}
+
+// Record obj's klass (or null) in the type entry at mdo_addr. Clobbers obj,
+// tmp and t0 only (callers keep state in t1-t4).
+void InterpreterMacroAssembler::profile_obj_type(Register obj, const Address& mdo_addr, Register tmp) {
+  assert_different_registers(obj, tmp, t0, mdo_addr.base());
+  Label update, next, none;
+
+  verify_oop(obj);
+
+  bnez(obj, update);
+  or_type_entry(this, mdo_addr, TypeEntries::null_seen, tmp);
+  j(next);
+
+  bind(update);
+  load_klass(obj, obj);
+
+  ld8(tmp, mdo_addr);
+  xor_(obj, obj, tmp);
+  Assembler::and_imm(t0, TypeEntries::type_klass_mask, obj);
+  beqz(t0, next); // klass seen before, nothing to
+                  // do. The unknown bit may have been
+                  // set already but no need to check.
+
+  tbit_nz(ptmp0, ptmp1, obj, exact_log2(TypeEntries::type_unknown));
+  br_cond(next, ptmp0);
+  // already unknown. Nothing to do anymore.
+
+  beqz(tmp, none);
+  cmp_eq_imm(ptmp0, ptmp1, TypeEntries::null_seen, tmp);
+  br_cond(none, ptmp0);
+  // There is a chance that the checks above
+  // fail if another thread has just set the
+  // profiling to this obj's klass
+  xor_(obj, obj, tmp); // get back original value before XOR
+  ld8(tmp, mdo_addr);
+  xor_(obj, obj, tmp);
+  Assembler::and_imm(t0, TypeEntries::type_klass_mask, obj);
+  beqz(t0, next);
+
+  // different than before. Cannot keep accurate profile.
+  or_type_entry(this, mdo_addr, TypeEntries::type_unknown, tmp);
+  j(next);
+
+  bind(none);
+  // first time here. Set profile type.
+  st8(mdo_addr, obj, t0);
+
+  bind(next);
+}
+
+// The call's argument types (and the return type's slot) after the
+// CallTypeData/VirtualCallTypeData that profile_call/profile_*_call has just
+// stepped over. t2-t4 hold the loop state: nothing below touches them.
 void InterpreterMacroAssembler::profile_arguments_type(Register mdp, Register callee, Register tmp, bool is_virtual) {
-  if (ProfileInterpreter) { IA64_NO_TYPE_PROFILING(); }
-}
-void InterpreterMacroAssembler::profile_return_type(Register mdp, Register ret, Register tmp) {
-  if (ProfileInterpreter) { IA64_NO_TYPE_PROFILING(); }
-}
-void InterpreterMacroAssembler::profile_parameters_type(Register mdp, Register tmp1, Register tmp2, Register tmp3) {
-  if (ProfileInterpreter) { IA64_NO_TYPE_PROFILING(); }
+  if (!ProfileInterpreter) {
+    return;
+  }
+
+  if (MethodData::profile_arguments() || MethodData::profile_return()) {
+    assert_different_registers(mdp, callee, tmp, t0, t1, t2, t3, t4);
+    Label profile_continue;
+
+    test_method_data_pointer(mdp, profile_continue);
+
+    int off_to_start = is_virtual ? in_bytes(VirtualCallData::virtual_call_data_size()) : in_bytes(CounterData::counter_data_size());
+
+    adds(t0, in_bytes(DataLayout::tag_offset()) - off_to_start, mdp);
+    Assembler::ld1(t0, t0);
+    cmp_eq_imm(ptmp0, ptmp1, is_virtual ? DataLayout::virtual_call_type_data_tag : DataLayout::call_type_data_tag, t0);
+    br_cond(profile_continue, ptmp1);
+
+    // calculate slot step
+    static int stack_slot_offset0 = in_bytes(TypeEntriesAtCall::stack_slot_offset(0));
+    static int slot_step = in_bytes(TypeEntriesAtCall::stack_slot_offset(1)) - stack_slot_offset0;
+
+    // calculate type step
+    static int argument_type_offset0 = in_bytes(TypeEntriesAtCall::argument_type_offset(0));
+    static int type_step = in_bytes(TypeEntriesAtCall::argument_type_offset(1)) - argument_type_offset0;
+
+    if (MethodData::profile_arguments()) {
+      Label done, loop, loopEnd, profileArgument, profileReturnType;
+      const Register mdo_addr = t2;
+      const Register index = t3;
+      const Register off_to_args = t4;
+      const int per_arg_count = TypeStackSlotEntries::per_arg_count();
+
+      mov_immediate(off_to_args, in_bytes(TypeEntriesAtCall::args_data_offset()));
+      if (TypeProfileArgsLimit == 0) {
+        j(loopEnd);
+      }
+
+      mov(index, zr); // index < TypeProfileArgsLimit
+      bind(loop);
+      bnez(index, profileReturnType);
+      if (!MethodData::profile_return()) {
+        j(profileArgument); // (index > 0 || MethodData::profile_return()) == false
+      }
+      bind(profileReturnType);
+      // If return value type is profiled we may have no argument to profile
+      ld8(tmp, Address(mdp, in_bytes(TypeEntriesAtCall::cell_count_offset())));
+      mul_imm(t1, index, per_arg_count, t0);
+      sub(tmp, tmp, t1);
+      mov_immediate(t1, per_arg_count);
+      add(t0, mdp, off_to_args);
+      blt(tmp, t1, done);
+
+      bind(profileArgument);
+
+      ld8(tmp, Address(callee, Method::const_offset()));
+      ld2(tmp, Address(tmp, ConstMethod::size_of_parameters_offset()));
+      // stack offset o (zero based) from the start of the argument
+      // list, for n arguments translates into offset n - o - 1 from
+      // the end of the argument list
+      mul_imm(t0, index, slot_step, t1);
+      adds(t0, stack_slot_offset0, t0);
+      add(t0, mdp, t0);
+      Assembler::ld8(t0, t0);
+      sub(tmp, tmp, t0);
+      adds(tmp, -1, tmp);
+      // the argument, counted from the top of the expression stack
+      shladd(tmp, tmp, Interpreter::logStackElementSize, Resp);
+      ld8(tmp, Address(tmp, Interpreter::expr_offset_in_bytes(0)));
+
+      mul_imm(t0, index, type_step, t1);
+      adds(t0, argument_type_offset0, t0);
+      add(mdo_addr, mdp, t0);
+      profile_obj_type(tmp, Address(mdo_addr, 0), t1);
+
+      int to_add = in_bytes(TypeStackSlotEntries::per_arg_size());
+      adds(off_to_args, to_add, off_to_args);
+
+      // increment index by 1
+      adds(index, 1, index);
+      mov_immediate(t1, TypeProfileArgsLimit);
+      blt(index, t1, loop);
+      bind(loopEnd);
+
+      if (MethodData::profile_return()) {
+        ld8(tmp, Address(mdp, in_bytes(TypeEntriesAtCall::cell_count_offset())));
+        add_imm(tmp, tmp, -(int64_t)(TypeProfileArgsLimit * per_arg_count), t1);
+      }
+
+      add(t0, mdp, off_to_args);
+      bind(done);
+      mov(mdp, t0);
+
+      if (MethodData::profile_return()) {
+        // We're right after the type profile for the last
+        // argument. tmp is the number of cells left in the
+        // CallTypeData/VirtualCallTypeData to reach its end. Non null
+        // if there's a return to profile.
+        assert(ReturnTypeEntry::static_cell_count() < TypeStackSlotEntries::per_arg_count(), "can't move past ret type");
+        shladd(mdp, tmp, exact_log2(DataLayout::cell_size), mdp);
+      }
+      st8(Address(fp, frame::interpreter_frame_mdp_offset * wordSize), mdp);
+    } else {
+      assert(MethodData::profile_return(), "either profile call args or call ret");
+      update_mdp_by_constant(mdp, in_bytes(TypeEntriesAtCall::return_only_size()));
+    }
+
+    // mdp points right after the end of the
+    // CallTypeData/VirtualCallTypeData, right after the cells for the
+    // return value type if there's one
+
+    bind(profile_continue);
+  }
 }
 
-#undef IA64_NO_TYPE_PROFILING
+// ret is preserved; it is copied to tmp for profile_obj_type.
+void InterpreterMacroAssembler::profile_return_type(Register mdp, Register ret, Register tmp) {
+  assert_different_registers(mdp, ret, tmp, Rbcp, t0, t1);
+  if (ProfileInterpreter && MethodData::profile_return()) {
+    Label profile_continue, done;
+
+    test_method_data_pointer(mdp, profile_continue);
+
+    if (MethodData::profile_return_jsr292_only()) {
+      assert(Method::intrinsic_id_size_in_bytes() == 2, "assuming Method::_intrinsic_id is u2");
+
+      // If we don't profile all invoke bytecodes we must make sure
+      // it's a bytecode we indeed profile. We can't go back to the
+      // beginning of the ProfileData we intend to update to check its
+      // type because we're right after it and we don't known its
+      // length
+      Label do_profile;
+      Assembler::ld1(t0, Rbcp);
+      cmp_eq_imm(ptmp0, ptmp1, Bytecodes::_invokedynamic, t0);
+      br_cond(do_profile, ptmp0);
+      cmp_eq_imm(ptmp0, ptmp1, Bytecodes::_invokehandle, t0);
+      br_cond(do_profile, ptmp0);
+      get_method(tmp);
+      ld2(t0, Address(tmp, Method::intrinsic_id_offset()));
+      cmp_eq_imm(ptmp0, ptmp1, static_cast<int>(vmIntrinsics::_compiledLambdaForm), t0);
+      br_cond(profile_continue, ptmp1);
+      bind(do_profile);
+    }
+
+    Address mdo_ret_addr(mdp, -in_bytes(ReturnTypeEntry::size()));
+    mov(tmp, ret);
+    profile_obj_type(tmp, mdo_ret_addr, t2);
+
+    bind(profile_continue);
+  }
+}
+
+// The method's parameter types, at entry. mdp is clobbered.
+void InterpreterMacroAssembler::profile_parameters_type(Register mdp, Register tmp1, Register tmp2, Register tmp3) {
+  assert_different_registers(t0, t1, t2, mdp, tmp1, tmp2, tmp3);
+  if (ProfileInterpreter && MethodData::profile_parameters()) {
+    Label profile_continue, done;
+
+    test_method_data_pointer(mdp, profile_continue);
+
+    // Load the offset of the area within the MDO used for
+    // parameters. If it's negative we're not profiling any parameters
+    ld4(tmp1, Address(mdp, in_bytes(MethodData::parameters_type_data_di_offset()) - in_bytes(MethodData::data_offset())));
+    tbit_nz(ptmp0, ptmp1, tmp1, 31);
+    br_cond(profile_continue, ptmp0);  // i.e. sign bit set
+
+    // Compute a pointer to the area for parameters from the offset
+    // and move the pointer to the slot for the last
+    // parameters. Collect profiling from last parameter down.
+    // mdo start + parameters offset + array length - 1
+    add(mdp, mdp, tmp1);
+    ld8(tmp1, Address(mdp, ArrayData::array_len_offset()));
+    adds(tmp1, -TypeStackSlotEntries::per_arg_count(), tmp1);
+
+    Label loop;
+    bind(loop);
+
+    int off_base = in_bytes(ParametersTypeData::stack_slot_offset(0));
+    int type_base = in_bytes(ParametersTypeData::type_offset(0));
+    int per_arg_scale = exact_log2(DataLayout::cell_size);
+    adds(t0, off_base, mdp);
+    adds(t2, type_base, mdp);
+
+    shladd(tmp2, tmp1, per_arg_scale, t0);
+    // load offset on the stack from the slot for this parameter
+    Assembler::ld8(tmp2, tmp2);
+    neg(tmp2, tmp2);
+
+    // read the parameter from the local area
+    shladd(tmp2, tmp2, Interpreter::logStackElementSize, Rlocals);
+    Assembler::ld8(tmp2, tmp2);
+
+    // profile the parameter
+    shladd(t2, tmp1, per_arg_scale, t2);
+    profile_obj_type(tmp2, Address(t2, 0), tmp3);
+
+    // go to next parameter
+    adds(tmp1, -TypeStackSlotEntries::per_arg_count(), tmp1);
+    cmp_lt(ptmp0, ptmp1, tmp1, zr);
+    br_cond(loop, ptmp1);    // while tmp1 >= 0
+
+    bind(profile_continue);
+  }
+}
 
 // ---- JVMTI / dtrace -------------------------------------------------------------
 

@@ -1896,12 +1896,196 @@ void LIR_Assembler::emit_updatecrc32(LIR_OpUpdateCRC32* op) {
   Unimplemented();
 }
 
-// Argument/return/parameter type profiling: only with TypeProfileLevel > 0,
-// which is 0 on IA-64 for now (globals_ia64.hpp; the interpreter does not
-// record type entries either).
+// Argument/return/parameter type profiling (TypeProfileLevel), after riscv.
+// The type entry's address is materialised once (mdo, t2), so every access
+// below is a plain [mdo]; t0/t1 are the scratch registers.
+
+// [mdo] |= bits
+static void or_type_entry(MacroAssembler* masm, Register mdo, int bits) {
+  masm->Assembler::ld8(t1, mdo);
+  masm->or_imm(t1, bits, t1);
+  masm->Assembler::st8(mdo, t1);
+}
+
+void LIR_Assembler::check_conflict(ciKlass* exact_klass, intptr_t current_klass,
+                                   Register tmp, Label &next, Label &none, Register mdo) {
+  if (exact_klass == nullptr || TypeEntries::is_type_none(current_klass)) {
+    if (exact_klass != nullptr) {
+      __ mov_metadata(tmp, exact_klass->constant_encoding());
+    } else {
+      __ load_klass(tmp, tmp);
+    }
+
+    __ Assembler::ld8(t1, mdo);
+    __ xor_(tmp, tmp, t1);
+    __ and_imm(t0, TypeEntries::type_klass_mask, tmp);
+    // klass seen before, nothing to do. The unknown bit may have been
+    // set already but no need to check.
+    __ beqz(t0, next);
+
+    // already unknown. Nothing to do anymore.
+    __ tbit_nz(ptmp0, ptmp1, tmp, exact_log2(TypeEntries::type_unknown));
+    __ br_cond(next, ptmp0);
+
+    if (TypeEntries::is_type_none(current_klass)) {
+      __ beqz(t1, none);
+      __ cmp_eq_imm(ptmp0, ptmp1, TypeEntries::null_seen, t1);
+      __ br_cond(none, ptmp0);
+      // There is a chance that the checks above
+      // fail if another thread has just set the
+      // profiling to this obj's klass
+      __ mf();
+      __ xor_(tmp, tmp, t1); // get back original value before XOR
+      __ Assembler::ld8(t1, mdo);
+      __ xor_(tmp, tmp, t1);
+      __ and_imm(t0, TypeEntries::type_klass_mask, tmp);
+      __ beqz(t0, next);
+    }
+  } else {
+    assert(ciTypeEntries::valid_ciklass(current_klass) != nullptr &&
+           ciTypeEntries::valid_ciklass(current_klass) != exact_klass, "conflict only");
+
+    __ Assembler::ld8(tmp, mdo);
+    // already unknown. Nothing to do anymore.
+    __ tbit_nz(ptmp0, ptmp1, tmp, exact_log2(TypeEntries::type_unknown));
+    __ br_cond(next, ptmp0);
+  }
+
+  // different than before. Cannot keep accurate profile.
+  or_type_entry(_masm, mdo, TypeEntries::type_unknown);
+
+  if (TypeEntries::is_type_none(current_klass)) {
+    __ j(next);
+
+    __ bind(none);
+    // first time here. Set profile type.
+    __ Assembler::st8(mdo, tmp);
+  }
+}
+
+void LIR_Assembler::check_no_conflict(ciKlass* exact_klass, intptr_t current_klass, Register tmp,
+                                      Register mdo, Label &next) {
+  // There's a single possible klass at this profile point
+  assert(exact_klass != nullptr, "should be");
+  if (TypeEntries::is_type_none(current_klass)) {
+    __ mov_metadata(tmp, exact_klass->constant_encoding());
+    __ Assembler::ld8(t1, mdo);
+    __ xor_(tmp, tmp, t1);
+    __ and_imm(t0, TypeEntries::type_klass_mask, tmp);
+    __ beqz(t0, next);
+#ifdef ASSERT
+    {
+      Label ok;
+      __ Assembler::ld8(t0, mdo);
+      __ beqz(t0, ok);
+      __ cmp_eq_imm(ptmp0, ptmp1, TypeEntries::null_seen, t0);
+      __ br_cond(ok, ptmp0);
+      // may have been set by another thread
+      __ mf();
+      __ mov_metadata(t0, exact_klass->constant_encoding());
+      __ Assembler::ld8(t1, mdo);
+      __ xor_(t1, t0, t1);
+      __ and_imm(t1, TypeEntries::type_mask, t1);
+      __ beqz(t1, ok);
+
+      __ stop("unexpected profiling mismatch");
+      __ bind(ok);
+    }
+#endif
+    // first time here. Set profile type.
+    __ Assembler::st8(mdo, tmp);
+  } else {
+    assert(ciTypeEntries::valid_ciklass(current_klass) != nullptr &&
+           ciTypeEntries::valid_ciklass(current_klass) != exact_klass, "inconsistent");
+
+    __ Assembler::ld8(tmp, mdo);
+    // already unknown. Nothing to do anymore.
+    __ tbit_nz(ptmp0, ptmp1, tmp, exact_log2(TypeEntries::type_unknown));
+    __ br_cond(next, ptmp0);
+
+    __ or_imm(tmp, TypeEntries::type_unknown, tmp);
+    __ Assembler::st8(mdo, tmp);
+  }
+}
+
+void LIR_Assembler::check_exact_klass(Register tmp, ciKlass* exact_klass) {
+  Label ok;
+  __ load_klass(tmp, tmp);
+  __ mov_metadata(t1, exact_klass->constant_encoding());
+  __ beq(tmp, t1, ok);
+  __ stop("exact klass and actual klass differ");
+  __ bind(ok);
+}
+
+void LIR_Assembler::check_null(Register tmp, Label &update, intptr_t current_klass,
+                               Register mdo, bool do_update, Label &next) {
+  __ bnez(tmp, update);
+  if (!TypeEntries::was_null_seen(current_klass)) {
+    or_type_entry(_masm, mdo, TypeEntries::null_seen);
+  }
+  if (do_update) {
+    __ j(next);
+  }
+}
+
 void LIR_Assembler::emit_profile_type(LIR_OpProfileType* op) {
-  guarantee(TypeProfileLevel == 0, "IA-64: C1 type profiling not implemented");
-  ShouldNotReachHere();
+  COMMENT("emit_profile_type {");
+  Register obj = op->obj()->as_register();
+  Register tmp = op->tmp()->as_pointer_register();
+  ciKlass* exact_klass = op->exact_klass();
+  intptr_t current_klass = op->current_klass();
+  bool not_null = op->not_null();
+  bool no_conflict = op->no_conflict();
+
+  Label update, next, none;
+
+  bool do_null = !not_null;
+  bool exact_klass_set = exact_klass != nullptr && ciTypeEntries::valid_ciklass(current_klass) == exact_klass;
+  bool do_update = !TypeEntries::is_type_unknown(current_klass) && !exact_klass_set;
+
+  assert(do_null || do_update, "why are we here?");
+  assert(!TypeEntries::was_null_seen(current_klass) || do_update, "why are we here?");
+  assert_different_registers(tmp, t0, t1, t2);
+
+  // The type entry's address, once.
+  Register mdo = addr_reg(op->mdp()->as_address_ptr(), t2);
+  if (mdo != t2) {
+    __ mov(t2, mdo);
+    mdo = t2;
+  }
+
+  __ verify_oop(obj);
+
+  if (tmp != obj) {
+    __ mov(tmp, obj);
+  }
+  if (do_null) {
+    check_null(tmp, update, current_klass, mdo, do_update, next);
+#ifdef ASSERT
+  } else {
+    __ bnez(tmp, update);
+    __ stop("unexpected null obj");
+#endif
+  }
+
+  __ bind(update);
+
+  if (do_update) {
+#ifdef ASSERT
+    if (exact_klass != nullptr) {
+      // Leaves tmp holding the klass; the code below reloads it.
+      check_exact_klass(tmp, exact_klass);
+    }
+#endif
+    if (!no_conflict) {
+      check_conflict(exact_klass, current_klass, tmp, next, none, mdo);
+    } else {
+      check_no_conflict(exact_klass, current_klass, tmp, mdo, next);
+    }
+
+    __ bind(next);
+  }
+  COMMENT("} emit_profile_type");
 }
 
 void LIR_Assembler::align_backward_branch_target() { }
