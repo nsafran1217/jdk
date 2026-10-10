@@ -592,3 +592,101 @@ void C2_MacroAssembler::char_array_compress(Register src_in, Register dst_in, Re
   j(tail);
   bind(done);
 }
+
+// Scan for the needle's first char as indexOf(char) does (czx on whole
+// words of the haystack once aligned), then compare the rest of the needle
+// element by element; on a mismatch resume the scan one char further on.
+void C2_MacroAssembler::string_indexof(Register str1, Register cnt1, Register str2, Register cnt2,
+                                       Register result, Register tmp1, Register tmp2,
+                                       Register tmp3, Register tmp4, Register tmp5,
+                                       Register tmp6, Register tmp7, Register tmp8,
+                                       Register tmp9, int ae) {
+  assert(ae == StrIntrinsicNode::LL || ae == StrIntrinsicNode::UU || ae == StrIntrinsicNode::UL, "encoding");
+  const bool hL = (ae == StrIntrinsicNode::LL);   // Latin-1 haystack
+  const bool nL = (ae != StrIntrinsicNode::UU);   // Latin-1 needle
+  const int hs = hL ? 1 : 2, ns = nL ? 1 : 2;
+  const int per_word = 8 / hs;
+  // first (the needle's first char) lives in t0 throughout.
+  const Register needle = tmp2, cnt = tmp3, cur = tmp4, m = tmp5, bc = tmp6, x = tmp7;
+  const Register nc = tmp1, hc = tmp8, y = tmp9, k = t1;
+  Label scan, words, word_loop, word_found, tail, candidate, cmp_loop, mismatch, not_found, done;
+
+  mov(needle, str2);
+  mov(cur, str1);
+  sxt4(m, cnt2);
+  sxt4(cnt, cnt1);
+  sub(cnt, cnt, m);
+  adds(cnt, 1, cnt);                        // possible starts left, >= 1
+  if (nL) Assembler::ld1(t0, needle); else Assembler::ld2(t0, needle);
+  if (hL) {
+    mux1_brcst(bc, t0);                     // t0 is zero-extended by the load
+  } else {
+    mux2(bc, t0, 0);
+  }
+  mov(result, zr);                          // the index at cur
+
+  // The scan: from cur, find the next start whose char is first.
+  bind(scan);
+  beqz(cnt, not_found);
+  and_imm(t1, 7, cur);
+  beqz(t1, words);
+  if (hL) Assembler::ld1(x, cur); else Assembler::ld2(x, cur);
+  cmp4_eq(ptmp0, ptmp1, x, t0);
+  br_cond(candidate, ptmp0);
+  adds(cur, hs, cur);
+  adds(result, 1, result);
+  adds(cnt, -1, cnt);
+  j(scan);
+
+  bind(words);
+  mov_immediate(t1, per_word);
+  bind(word_loop);
+  cmp_lt(ptmp0, ptmp1, cnt, t1);
+  br_cond(tail, ptmp0);
+  Assembler::ld8(x, cur);
+  xor_(x, x, bc);
+  if (hL) czx1_r(x, x); else czx2_r(x, x);
+  cmp_ne(ptmp0, ptmp1, x, t1);
+  br_cond(word_found, ptmp0);
+  adds(cur, 8, cur);
+  adds(result, per_word, result);
+  adds(cnt, -per_word, cnt);
+  j(word_loop);
+  bind(word_found);                         // x elements on is a match
+  add(result, result, x);
+  sub(cnt, cnt, x);
+  if (hL) add(cur, cur, x); else shladd(cur, x, 1, cur);
+  j(candidate);
+
+  bind(tail);
+  beqz(cnt, not_found);
+  if (hL) Assembler::ld1(x, cur); else Assembler::ld2(x, cur);
+  cmp4_eq(ptmp0, ptmp1, x, t0);
+  br_cond(candidate, ptmp0);
+  adds(cur, hs, cur);
+  adds(result, 1, result);
+  adds(cnt, -1, cnt);
+  j(tail);
+
+  // hay[result] == first: compare needle[1..m-1] with the chars after it.
+  bind(candidate);
+  adds(nc, ns, needle);
+  adds(hc, hs, cur);
+  adds(k, -1, m);
+  bind(cmp_loop);
+  beqz(k, done);                            // the whole needle matched
+  if (nL) ld1_inc(x, nc, 1); else ld2_inc(x, nc, 2);
+  if (hL) ld1_inc(y, hc, 1); else ld2_inc(y, hc, 2);
+  adds(k, -1, k);
+  cmp4_eq(ptmp0, ptmp1, x, y);
+  br_cond(cmp_loop, ptmp0);
+  bind(mismatch);                           // resume one char further on
+  adds(cur, hs, cur);
+  adds(result, 1, result);
+  adds(cnt, -1, cnt);
+  j(scan);
+
+  bind(not_found);
+  mov_immediate(result, -1);
+  bind(done);
+}

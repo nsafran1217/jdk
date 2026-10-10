@@ -82,7 +82,7 @@
   //
   // Word loops (ld8 with post-increment) where both operands start 8-byte
   // aligned -- element 0 of a byte[] or char[] (base offset 16) -- since an
-  // unaligned ld8 traps. Scratch: t1 (and t0 in compress), p6/p7.
+  // unaligned ld8 traps. Scratch: t1 (and t0 in compress and indexOf), p6/p7.
 
   // The inputs are only read; the routines work on copies in their temps.
   // StrEquals (LL): cnt bytes at str1 and str2. result = 1 if equal, else 0.
@@ -101,6 +101,12 @@
   // first ch, or -1.
   void string_indexof_char(Register str, Register cnt, Register ch, Register result,
                            Register tmp1, Register tmp2, Register tmp3, Register tmp4, bool isL);
+  // StrIndexOf: the first index of the cnt2 chars at str2 within the cnt1
+  // chars at str1 (1 <= cnt2 <= cnt1, checked by the caller), or -1. ae is
+  // LL, UU or UL (UTF-16 haystack, Latin-1 needle).
+  void string_indexof(Register str1, Register cnt1, Register str2, Register cnt2, Register result,
+                      Register tmp1, Register tmp2, Register tmp3, Register tmp4, Register tmp5,
+                      Register tmp6, Register tmp7, Register tmp8, Register tmp9, int ae);
   // StrInflatedCopy: len Latin-1 bytes at src to UTF-16 chars at dst.
   void byte_array_inflate(Register src, Register dst, Register len,
                           Register tmp1, Register tmp2, Register tmp3, Register tmp4);

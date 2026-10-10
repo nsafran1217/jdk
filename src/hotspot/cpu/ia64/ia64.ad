@@ -7225,6 +7225,69 @@ instruct encode_ascii_array(iRegP src, iRegP dst, iRegI len, iRegI result,
   ins_pipe(pipe_slow);
 %}
 
+instruct string_indexofLL(iRegP str1, iRegI cnt1, iRegP str2, iRegI cnt2, iRegI result,
+                         iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4,
+                         iRegPNoSp tmp5, iRegPNoSp tmp6, iRegPNoSp tmp7, iRegPNoSp tmp8,
+                         iRegPNoSp tmp9)
+%{
+  predicate(((StrIndexOfNode*)n)->encoding() == StrIntrinsicNode::LL);
+  match(Set result (StrIndexOf (Binary str1 cnt1) (Binary str2 cnt2)));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4, TEMP tmp5, TEMP tmp6,
+         TEMP tmp7, TEMP tmp8, TEMP tmp9);
+
+  ins_cost(20 * DEFAULT_COST);
+  format %{ "String IndexOf $str1, $cnt1, $str2, $cnt2 -> $result\t# @string_indexofLL" %}
+  ins_encode %{
+    __ string_indexof($str1$$Register, $cnt1$$Register, $str2$$Register, $cnt2$$Register,
+                      $result$$Register, $tmp1$$Register, $tmp2$$Register, $tmp3$$Register,
+                      $tmp4$$Register, $tmp5$$Register, $tmp6$$Register, $tmp7$$Register,
+                      $tmp8$$Register, $tmp9$$Register, StrIntrinsicNode::LL);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
+instruct string_indexofUU(iRegP str1, iRegI cnt1, iRegP str2, iRegI cnt2, iRegI result,
+                         iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4,
+                         iRegPNoSp tmp5, iRegPNoSp tmp6, iRegPNoSp tmp7, iRegPNoSp tmp8,
+                         iRegPNoSp tmp9)
+%{
+  predicate(((StrIndexOfNode*)n)->encoding() == StrIntrinsicNode::UU);
+  match(Set result (StrIndexOf (Binary str1 cnt1) (Binary str2 cnt2)));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4, TEMP tmp5, TEMP tmp6,
+         TEMP tmp7, TEMP tmp8, TEMP tmp9);
+
+  ins_cost(20 * DEFAULT_COST);
+  format %{ "String IndexOf $str1, $cnt1, $str2, $cnt2 -> $result\t# @string_indexofUU" %}
+  ins_encode %{
+    __ string_indexof($str1$$Register, $cnt1$$Register, $str2$$Register, $cnt2$$Register,
+                      $result$$Register, $tmp1$$Register, $tmp2$$Register, $tmp3$$Register,
+                      $tmp4$$Register, $tmp5$$Register, $tmp6$$Register, $tmp7$$Register,
+                      $tmp8$$Register, $tmp9$$Register, StrIntrinsicNode::UU);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
+instruct string_indexofUL(iRegP str1, iRegI cnt1, iRegP str2, iRegI cnt2, iRegI result,
+                         iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4,
+                         iRegPNoSp tmp5, iRegPNoSp tmp6, iRegPNoSp tmp7, iRegPNoSp tmp8,
+                         iRegPNoSp tmp9)
+%{
+  predicate(((StrIndexOfNode*)n)->encoding() == StrIntrinsicNode::UL);
+  match(Set result (StrIndexOf (Binary str1 cnt1) (Binary str2 cnt2)));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4, TEMP tmp5, TEMP tmp6,
+         TEMP tmp7, TEMP tmp8, TEMP tmp9);
+
+  ins_cost(20 * DEFAULT_COST);
+  format %{ "String IndexOf $str1, $cnt1, $str2, $cnt2 -> $result\t# @string_indexofUL" %}
+  ins_encode %{
+    __ string_indexof($str1$$Register, $cnt1$$Register, $str2$$Register, $cnt2$$Register,
+                      $result$$Register, $tmp1$$Register, $tmp2$$Register, $tmp3$$Register,
+                      $tmp4$$Register, $tmp5$$Register, $tmp6$$Register, $tmp7$$Register,
+                      $tmp8$$Register, $tmp9$$Register, StrIntrinsicNode::UL);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
 instruct count_positives(iRegP ary, iRegI len, iRegI result,
                          iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4)
 %{
