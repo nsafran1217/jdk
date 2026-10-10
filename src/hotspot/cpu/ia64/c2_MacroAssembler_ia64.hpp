@@ -29,5 +29,46 @@
 // C2_MacroAssembler contains high-level macros for C2
 
  public:
+  // ---- memory access (C2-DESIGN.md section 5) -------------------------------
+  //
+  // The access kinds an .ad memory node emits.
+  enum MemOp {
+    op_ld1, op_ld2, op_ld4, op_ld8, op_ld4_acq, op_ld8_acq,
+    op_st1, op_st2, op_st4, op_st8, op_st4_rel, op_st8_rel,
+    op_ldfs, op_ldfd, op_stfs, op_stfd
+  };
+
+  // One access at base + disp, as exactly one bundle: { op [base] } or, for a
+  // non-zero 14-bit displacement, the M;;MI bundle { adds t0 = disp, base ;;
+  // op [t0] ; nop.i }. The node therefore starts at its faulting bundle, which
+  // is what makes implicit null checks work: the signal handler looks the
+  // fault up at the bundle address. data is the register loaded or stored
+  // (a GR or FR encoding, by op).
+  void access(MemOp op, int data, Register base, int disp);
+
+  // ---- compare and branch (C2-DESIGN.md section 4) ---------------------------
+  //
+  // The relation is a BoolTest::mask ($cop$$cmpcode).
+  enum CmpKind { cmp_int, cmp_uint, cmp_long, cmp_ulong };
+
+  // Branch to L if (a <cmpcode> b), comparing as kind. Clobbers p6/p7.
+  void cmp_branch(int cmpcode, CmpKind kind, Register a, Register b, Label& L);
+  // Floating point: unordered counts as less, as everywhere in C2 (lt, le and
+  // ne are taken for a NaN operand; gt, ge and eq are not).
+  void float_cmp_branch(int cmpcode, FloatRegister a, FloatRegister b, Label& L);
+
+  // Set (pt, pf) to (a <cmpcode> b, its complement).
+  void cmp_preds(int cmpcode, CmpKind kind, Register a, Register b,
+                 PredicateRegister pt, PredicateRegister pf);
+  void float_cmp_preds(int cmpcode, FloatRegister a, FloatRegister b,
+                       PredicateRegister pt, PredicateRegister pf);
+
+  // ---- locking ---------------------------------------------------------------
+  //
+  // FastLock/FastUnlock (lightweight locking). The result is the RFLAGS pair:
+  // p10 set (and p11 clear) on success, the reverse when the runtime must
+  // finish the job. Inflated monitors always take the slow path.
+  void fast_lock_lightweight(Register obj, Register box, Register tmp1, Register tmp2, Register tmp3);
+  void fast_unlock_lightweight(Register obj, Register box, Register tmp1, Register tmp2, Register tmp3);
 
 #endif // CPU_IA64_C2_MACROASSEMBLER_IA64_HPP
