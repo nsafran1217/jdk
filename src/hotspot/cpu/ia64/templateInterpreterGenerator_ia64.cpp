@@ -437,7 +437,21 @@ address TemplateInterpreterGenerator::generate_cont_resume_interpreter_adapter()
 void TemplateInterpreterGenerator::generate_counter_incr(Label* overflow) {
   Label done;
   int increment = InvocationCounter::count_increment;
-  guarantee(!ProfileInterpreter, "IA-64: interpreter profiling arrives with C1");
+  // Note: In tiered we increment either counters in Method* or in MDO depending if we're profiling or not.
+  Label no_mdo;
+  if (ProfileInterpreter) {
+    // Are we profiling?
+    const Register mdo = Rtmp1;
+    __ ld8(mdo, Address(Rmethod, Method::method_data_offset()));
+    __ beqz(mdo, no_mdo);
+    // Increment counter in the MDO
+    const Address mdo_invocation_counter(mdo, in_bytes(MethodData::invocation_counter_offset()) +
+                                              in_bytes(InvocationCounter::counter_offset()));
+    const Address mask(mdo, in_bytes(MethodData::invoke_mask_offset()));
+    __ increment_mask_and_jump(mdo_invocation_counter, increment, mask, Rtmp2, Rtmp3, false, overflow);
+    __ j(done);
+  }
+  __ bind(no_mdo);
   // Increment counter in MethodCounters
   const Register mcs = Rtmp1;
   const Address invocation_counter(mcs,
@@ -623,7 +637,17 @@ void TemplateInterpreterGenerator::generate_fixed_frame(bool native_call) {
   __ st8(Address(sp, 0), t2);
 
   __ st8(Address(sp, 7 * wordSize), Rmethod);
-  __ st8(Address(sp, 6 * wordSize), zr);                      // mdp: no profiling
+  // mdp: the start of the MDO's data (bci 0), or null without an MDO
+  if (ProfileInterpreter) {
+    Label method_data_continue;
+    __ ld8(t2, Address(Rmethod, Method::method_data_offset()));
+    __ beqz(t2, method_data_continue);
+    __ adds(t2, in_bytes(MethodData::data_offset()), t2);
+    __ bind(method_data_continue);
+    __ st8(Address(sp, 6 * wordSize), t2);
+  } else {
+    __ st8(Address(sp, 6 * wordSize), zr);
+  }
 
   // IA-64: the return address is in b0, not in memory.
   __ mov_from_br(t2, breturn);
@@ -1383,6 +1407,12 @@ void TemplateInterpreterGenerator::generate_throw_exception() {
   __ restore_locals();
   __ restore_constant_pool_cache();
   __ get_method(Rmethod);
+
+  // The method data pointer was incremented already during
+  // call profiling. We have to restore the mdp for the current bcp.
+  if (ProfileInterpreter) {
+    __ set_method_data_pointer_for_bcp();
+  }
 
   // Clear the popframe condition flag
   __ st4(Address(Rthread, JavaThread::popframe_condition_offset()), zr);

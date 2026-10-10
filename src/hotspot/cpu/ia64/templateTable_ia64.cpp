@@ -1062,6 +1062,7 @@ void TemplateTable::aastore() {
 
   // Have a null in Rtos, R13=array, R12=index.  Store null at ary[idx]
   __ bind(is_null);
+  __ profile_null_seen(R12);
 
   // Store a null
   __ store_heap_oop(element_addr, noreg, R28, R29, R13, IS_ARRAY);
@@ -1615,6 +1616,7 @@ static void bswap32s(InterpreterMacroAssembler* _masm, Register r) {
 }
 
 void TemplateTable::branch(bool is_jsr, bool is_wide) {
+  __ profile_taken_branch(Rtos, R11);
   const ByteSize be_offset = MethodCounters::backedge_counter_offset() +
                              InvocationCounter::counter_offset();
 
@@ -1672,8 +1674,22 @@ void TemplateTable::branch(bool is_jsr, bool is_wide) {
     __ beqz(t2, dispatch); // No MethodCounters allocated, OutOfMemory
     __ bind(has_counters);
 
-    guarantee(!ProfileInterpreter, "IA-64: interpreter profiling arrives with C1");
+    Label no_mdo;
     int increment = InvocationCounter::count_increment;
+    if (ProfileInterpreter) {
+      // Are we profiling?
+      __ ld8(t2, Address(Rmethod, in_bytes(Method::method_data_offset())));
+      __ beqz(t2, no_mdo);
+      // Increment the MDO backedge counter
+      const Address mdo_backedge_counter(t2, in_bytes(MethodData::backedge_counter_offset()) +
+                                             in_bytes(InvocationCounter::counter_offset()));
+      const Address mask(t2, in_bytes(MethodData::backedge_mask_offset()));
+      __ increment_mask_and_jump(mdo_backedge_counter, increment, mask,
+                                 Rtos, t3, false,
+                                 UseOnStackReplacement ? &backedge_counter_overflow : &dispatch);
+      __ j(dispatch);
+    }
+    __ bind(no_mdo);
     // Increment backedge counter in MethodCounters*
     __ ld8(t2, Address(Rmethod, Method::method_counters_offset()));
     const Address mask(t2, in_bytes(MethodCounters::backedge_mask_offset()));
@@ -1713,8 +1729,10 @@ void TemplateTable::branch(bool is_jsr, bool is_wide) {
     //
     // IA-64: no preserved register is free across the call (r4-r7 are fp,
     // Rthread, Rbcp and Resp, and the expression stack must stay empty for
-    // OSR_migration_begin), so the nmethod waits in the frame's mdp slot,
-    // unused without interpreter profiling (guaranteed above).
+    // OSR_migration_begin), so the nmethod waits in the frame's mdp slot.
+    // The mdp is dead from here: OSR_migration_begin is a leaf (no
+    // safepoint, so nothing walks this frame), and the frame is discarded
+    // right after it.
     const Address nmethod_slot(fp, frame::interpreter_frame_mdp_offset * wordSize);
     __ st8(nmethod_slot, Rtos);
 
@@ -1778,6 +1796,7 @@ void TemplateTable::if_0cmp(Condition cc) {
   branch_unless(_masm, cc, Rtos, zr, not_taken, true);
   branch(false, false);
   __ bind(not_taken);
+  __ profile_not_taken_branch(Rtos);
 }
 
 void TemplateTable::if_icmp(Condition cc) {
@@ -1788,6 +1807,7 @@ void TemplateTable::if_icmp(Condition cc) {
   branch_unless(_masm, cc, R11, Rtos, not_taken, true);
   branch(false, false);
   __ bind(not_taken);
+  __ profile_not_taken_branch(Rtos);
 }
 
 void TemplateTable::if_nullcmp(Condition cc) {
@@ -1801,6 +1821,7 @@ void TemplateTable::if_nullcmp(Condition cc) {
   }
   branch(false, false);
   __ bind(not_taken);
+  __ profile_not_taken_branch(Rtos);
 }
 
 void TemplateTable::if_acmp(Condition cc) {
@@ -1816,12 +1837,14 @@ void TemplateTable::if_acmp(Condition cc) {
   }
   branch(false, false);
   __ bind(not_taken);
+  __ profile_not_taken_branch(Rtos);
 }
 
 void TemplateTable::ret() {
   transition(vtos, vtos);
   locals_index(R11);
   __ ld8(R11, aaddress(R11, t2, _masm)); // get return bci, compute return bcp
+  __ profile_ret(R11, R12);
   __ ld8(Rbcp, Address(Rmethod, Method::const_offset()));
   __ add(Rbcp, Rbcp, R11);
   __ adds(Rbcp, in_bytes(ConstMethod::codes_offset()), Rbcp);
@@ -1832,6 +1855,7 @@ void TemplateTable::wide_ret() {
   transition(vtos, vtos);
   locals_index_wide(R11);
   __ ld8(R11, aaddress(R11, t3, _masm)); // get return bci, compute return bcp
+  __ profile_ret(R11, R12);
   __ ld8(Rbcp, Address(Rmethod, Method::const_offset()));
   __ add(Rbcp, Rbcp, R11);
   __ adds(Rbcp, in_bytes(ConstMethod::codes_offset()), Rbcp);
@@ -1858,6 +1882,7 @@ void TemplateTable::tableswitch() {
   __ sub(Rtos, Rtos, R12);
   __ shladd(R13, Rtos, 2, R11);
   __ ld4(R13, Address(R13, 3 * BytesPerInt));
+  __ profile_switch_case(Rtos, R11, R12);
   // continue execution
   __ bind(continue_execution);
   bswap32s(_masm, R13);
@@ -1866,6 +1891,7 @@ void TemplateTable::tableswitch() {
   __ dispatch_only(vtos, /*generate_poll*/true);
   // handle default
   __ bind(default_case);
+  __ profile_switch_default(Rtos);
   __ ld4(R13, R11);
   __ j(continue_execution);
 }
@@ -1897,12 +1923,14 @@ void TemplateTable::fast_linearswitch() {
   __ cmp_lt(ptmp0, ptmp1, R11, zr);
   __ br_cond(loop, ptmp1);       // while R11 >= 0
   // default case
+  __ profile_switch_default(Rtos);
   __ ld4(R13, table);
   __ j(continue_execution);
   // entry found -> get offset
   __ bind(found);
   __ shladd(t2, R11, 3, table);
   __ ld4(R13, Address(t2, 3 * BytesPerInt));
+  __ profile_switch_case(R11, Rtos, R12);
   // continue execution
   __ bind(continue_execution);
   bswap32s(_masm, R13);
@@ -1992,6 +2020,7 @@ void TemplateTable::fast_binaryswitch() {
   __ shladd(temp, i, 3, array);
   __ ld4(j, Address(temp, BytesPerInt));
   bswap32s(_masm, j);
+  __ profile_switch_case(i, key, array);
 
   __ add(Rbcp, Rbcp, j);
   __ ld1(t0, Rbcp);
@@ -1999,6 +2028,7 @@ void TemplateTable::fast_binaryswitch() {
 
   // default case -> j = default offset
   __ bind(default_case);
+  __ profile_switch_default(i);
   __ ld4(j, Address(array, -2 * BytesPerInt));
   bswap32s(_masm, j);
 
@@ -3107,8 +3137,8 @@ void TemplateTable::prepare_invoke(Register cache, Register recv) {
 void TemplateTable::invokevirtual_helper(Register index,
                                          Register recv,
                                          Register flags) {
-  // Uses temporary registers Rtos, R13
-  assert_different_registers(index, recv, Rtos, R13);
+  // Uses temporary registers Rtos, R13, R14
+  assert_different_registers(index, recv, Rtos, R13, R14);
   // Test for an invoke of a final method
   Label notFinal;
   __ tbit_z(ptmp0, ptmp1, flags, ResolvedMethodEntry::is_vfinal_shift);
@@ -3123,6 +3153,10 @@ void TemplateTable::invokevirtual_helper(Register index,
   // It's final, need a null check here!
   __ null_check(recv);
 
+  // profile this call
+  __ profile_final_call(Rtos);
+  __ profile_arguments_type(Rtos, method, R14, true);
+
   __ jump_from_interpreted(method);
 
   __ bind(notFinal);
@@ -3130,8 +3164,12 @@ void TemplateTable::invokevirtual_helper(Register index,
   // get receiver klass
   __ load_klass(Rtos, recv);
 
+  // profile this call
+  __ profile_virtual_call(Rtos, R14, R13);
+
   // get target Method & entry point
   __ lookup_virtual_method(Rtos, index, method);
+  __ profile_arguments_type(R13, method, R14, true);
   __ jump_from_interpreted(method);
 }
 
@@ -3163,6 +3201,8 @@ void TemplateTable::invokespecial(int byte_no) {
   __ verify_oop(R12);
   __ null_check(R12);
   // do the call
+  __ profile_call(Rtos);
+  __ profile_arguments_type(Rtos, Rmethod, R14, false);
   __ jump_from_interpreted(Rmethod);
 }
 
@@ -3176,6 +3216,8 @@ void TemplateTable::invokestatic(int byte_no) {
   prepare_invoke(R12, R12);  // get receiver also for null check
 
   // do the call
+  __ profile_call(Rtos);
+  __ profile_arguments_type(Rtos, Rmethod, R14, false);
   __ jump_from_interpreted(Rmethod);
 }
 
@@ -3227,6 +3269,8 @@ void TemplateTable::invokeinterface(int byte_no) {
   __ j(no_such_interface);
   __ bind(subtype);
 
+  __ profile_final_call(Rtos);
+  __ profile_arguments_type(Rtos, Rmethod, R14, true);
   __ jump_from_interpreted(Rmethod);
 
   __ bind(notVFinal);
@@ -3247,6 +3291,9 @@ void TemplateTable::invokeinterface(int byte_no) {
                              R14, R30,
                              no_such_interface,
                              /*return_method=*/false);
+
+  // profile this call
+  __ profile_virtual_call(R13, R30, R9);
 
   // Get declaring interface class from method, and itable index
   __ load_method_holder(Rtos, Rmethod);
@@ -3274,6 +3321,7 @@ void TemplateTable::invokeinterface(int byte_no) {
   // do the call
   // R12: receiver
   // Rmethod: Method
+  __ profile_arguments_type(R13, Rmethod, R30, true);
   __ jump_from_interpreted(Rmethod);
   __ should_not_reach_here();
 
@@ -3315,6 +3363,10 @@ void TemplateTable::invokehandle(int byte_no) {
   __ verify_oop(R12);
   __ null_check(R12);
 
+  // FIXME: profile the LambdaForm also
+  __ profile_final_call(R30);
+  __ profile_arguments_type(R30, Rmethod, R14, true);
+
   __ jump_from_interpreted(Rmethod);
 }
 
@@ -3328,6 +3380,11 @@ void TemplateTable::invokedynamic(int byte_no) {
   // Rmethod: MH.linkToCallSite method
 
   // Note: Rtos_callsite is already pushed
+
+  // %%% should make a type profile for any invokedynamic that takes a ref argument
+  // profile this call
+  __ profile_call(R14);
+  __ profile_arguments_type(R13, Rmethod, R30, false);
 
   __ jump_from_interpreted(Rmethod);
 }
@@ -3499,7 +3556,14 @@ void TemplateTable::checkcast() {
   __ bind(ok_is_subtype);
   __ mov(Rtos, R13); // Restore object in R13
 
-  __ bind(is_null);   // same as 'done'
+  // Collect counts on whether this test sees nulls a lot or not.
+  if (ProfileInterpreter) {
+    __ j(done);
+    __ bind(is_null);
+    __ profile_null_seen(R12);
+  } else {
+    __ bind(is_null);   // same as 'done'
+  }
   __ bind(done);
 }
 
@@ -3544,7 +3608,14 @@ void TemplateTable::instanceof() {
   __ bind(ok_is_subtype);
   __ mov_immediate(Rtos, 1);
 
-  __ bind(is_null);   // same as 'done'
+  // Collect counts on whether this test sees nulls a lot or not.
+  if (ProfileInterpreter) {
+    __ j(done);
+    __ bind(is_null);
+    __ profile_null_seen(R12);
+  } else {
+    __ bind(is_null);   // same as 'done'
+  }
   __ bind(done);
   // Rtos = 0: obj is    null or  obj is not an instanceof the specified klass
   // Rtos = 1: obj isn't null and obj is     an instanceof the specified klass

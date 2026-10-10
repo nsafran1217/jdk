@@ -246,9 +246,9 @@ class InterpreterMacroAssembler: public MacroAssembler {
   void lock_object  (Register lock_reg);
   void unlock_object(Register lock_reg);
 
-  // Interpreter profiling operations. ProfileInterpreter is false without a
-  // compiler, which is all milestone 1 builds; these emit nothing then and
-  // refuse to generate otherwise (they arrive with C1).
+  // Interpreter profiling operations (MDO updates), after riscv. The method
+  // data pointer lives in the frame's mdp slot and is reloaded by each
+  // profile_* (test_method_data_pointer): nothing scratch survives a VM call.
   void set_method_data_pointer_for_bcp();
   void test_method_data_pointer(Register mdp, Label& zero_continue);
   void verify_method_data_pointer();
@@ -279,7 +279,7 @@ class InterpreterMacroAssembler: public MacroAssembler {
   void profile_call(Register mdp);
   void profile_final_call(Register mdp);
   void profile_virtual_call(Register receiver, Register mdp,
-                            Register t1,
+                            Register reg2,
                             bool receiver_can_be_null = false);
   void profile_ret(Register return_bci, Register mdp);
   void profile_null_seen(Register mdp);
@@ -288,6 +288,14 @@ class InterpreterMacroAssembler: public MacroAssembler {
   void profile_switch_default(Register mdp);
   void profile_switch_case(Register index_in_scratch, Register mdp,
                            Register temp);
+
+  typedef ByteSize (*OffsetFunction)(uint);
+  void record_klass_in_profile_helper(Register receiver, Register mdp,
+                                      Register reg2, Label& done);
+  void record_item_in_profile_helper(Register item, Register mdp,
+                                     Register reg2, int start_row, Label& done, int total_rows,
+                                     OffsetFunction item_offset_fn, OffsetFunction item_count_offset_fn);
+  void record_klass_in_profile(Register receiver, Register mdp, Register reg2);
 
   void profile_obj_type(Register obj, const Address& mdo_addr, Register tmp);
   void profile_arguments_type(Register mdp, Register callee, Register tmp, bool is_virtual);

@@ -108,8 +108,11 @@
   // fixup is needed.  Else we split the double into 2 integer pieces
   // and move it piece-by-piece.  Only happens when passing doubles into
   // C code as the Java calling convention forces doubles to be aligned.
-  // IA-64 traps on unaligned accesses.
-  static const bool misaligned_doubles_ok = false;
+  // IA-64 traps on unaligned accesses, but the only other user is the OSR
+  // entry (Parse::fetch_interpreter_state), and on LP64 every local in the OSR
+  // buffer is a whole, 8-byte aligned word. (false would ask for
+  // LoadL_unaligned/LoadD_unaligned rules.)
+  static const bool misaligned_doubles_ok = true;
 
   // Are floats converted to double when stored to stack during
   // deoptimization? Yes: register savers store every FPR as a memory-format
