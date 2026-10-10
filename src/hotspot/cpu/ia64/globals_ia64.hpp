@@ -108,10 +108,16 @@ define_pd_global(bool, CompactStrings, true);
 // Clear short arrays bigger than one word in an arch-specific way
 define_pd_global(intx, InitArrayShortSize, BytesPerLong);
 
-// C2's limit on an already-compiled callee's code size when inlining. IA-64
-// code is roughly 2-3x larger per bytecode than x86's, so the x86 value would
-// inline far less (JDK 6's IA-64 server VM shipped 3000; C2-SCOPE.md).
-define_pd_global(intx, InlineSmallCode, 2500);
+// C2's limit on an already-compiled callee's code size when inlining
+// ("already compiled into a big method"). It is a byte count, and IA-64 C2
+// code is 1.5-4x (typically 3x) larger than x86's for the same method
+// (measured: Long.parseLong 5088 vs 1656 bytes, Long.toString 2848 vs 1464),
+// so x86's tiered value, 2500, refused callees x86 inlines -- Long.toString,
+// TreeMap.put -- and made inlining depend on which callees happened to be
+// compiled first. Three times x86's: J6Bench2 sbuild 15.3 -> 7.1 ms, numFmt
+// 14.2 -> 7.7, regex -8% (rx2800; C2-DESIGN.md section 15). JDK 6's IA-64
+// server VM likewise shipped three times its x86 value (3000 vs 1000).
+define_pd_global(intx, InlineSmallCode, 7500);
 
 #define ARCH_FLAGS(develop,                                                      \
                    product,                                                      \
