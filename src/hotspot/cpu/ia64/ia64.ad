@@ -6742,6 +6742,143 @@ instruct get_and_addL(indirect mem, iRegL newval, iRegL incr)
 // ============================================================================
 // Subtype check slow path: result is zero on a hit, non-zero on a miss.
 
+// ---- String and array intrinsics -------------------------------------------
+// Word loops in C2_MacroAssembler; t1 and p6/p7 are their scratch.
+
+instruct string_equalsL(iRegP str1, iRegP str2, iRegI cnt, iRegI result,
+                        iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4, iRegPNoSp tmp5)
+%{
+  predicate(((StrEqualsNode*)n)->encoding() == StrIntrinsicNode::LL);
+  match(Set result (StrEquals (Binary str1 str2) cnt));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4, TEMP tmp5);
+
+  ins_cost(10 * DEFAULT_COST);
+  format %{ "String Equals $str1, $str2, $cnt -> $result\t# @string_equalsL" %}
+  ins_encode %{
+    __ string_equals($str1$$Register, $str2$$Register, $cnt$$Register, $result$$Register,
+                     $tmp1$$Register, $tmp2$$Register, $tmp3$$Register, $tmp4$$Register,
+                     $tmp5$$Register);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
+instruct array_equalsB(iRegP ary1, iRegP ary2, iRegI result,
+                       iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4, iRegPNoSp tmp5)
+%{
+  predicate(((AryEqNode*)n)->encoding() == StrIntrinsicNode::LL);
+  match(Set result (AryEq ary1 ary2));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4, TEMP tmp5);
+
+  ins_cost(10 * DEFAULT_COST);
+  format %{ "Array Equals $ary1, $ary2 -> $result\t# @array_equalsB" %}
+  ins_encode %{
+    __ arrays_equals($ary1$$Register, $ary2$$Register, $result$$Register,
+                     $tmp1$$Register, $tmp2$$Register, $tmp3$$Register, $tmp4$$Register,
+                     $tmp5$$Register, 1);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
+instruct array_equalsC(iRegP ary1, iRegP ary2, iRegI result,
+                       iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4, iRegPNoSp tmp5)
+%{
+  predicate(((AryEqNode*)n)->encoding() == StrIntrinsicNode::UU);
+  match(Set result (AryEq ary1 ary2));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4, TEMP tmp5);
+
+  ins_cost(10 * DEFAULT_COST);
+  format %{ "Array Equals $ary1, $ary2 -> $result\t# @array_equalsC" %}
+  ins_encode %{
+    __ arrays_equals($ary1$$Register, $ary2$$Register, $result$$Register,
+                     $tmp1$$Register, $tmp2$$Register, $tmp3$$Register, $tmp4$$Register,
+                     $tmp5$$Register, 2);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
+instruct string_compareLL(iRegP str1, iRegI cnt1, iRegP str2, iRegI cnt2, iRegI result,
+                        iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4, iRegPNoSp tmp5)
+%{
+  predicate(((StrCompNode*)n)->encoding() == StrIntrinsicNode::LL);
+  match(Set result (StrComp (Binary str1 cnt1) (Binary str2 cnt2)));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4, TEMP tmp5);
+
+  ins_cost(10 * DEFAULT_COST);
+  format %{ "String Compare $str1, $cnt1, $str2, $cnt2 -> $result\t# @string_compareLL" %}
+  ins_encode %{
+    __ string_compare($str1$$Register, $cnt1$$Register, $str2$$Register, $cnt2$$Register,
+                      $result$$Register, $tmp1$$Register, $tmp2$$Register, $tmp3$$Register,
+                      $tmp4$$Register, $tmp5$$Register, StrIntrinsicNode::LL);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
+instruct string_compareUU(iRegP str1, iRegI cnt1, iRegP str2, iRegI cnt2, iRegI result,
+                        iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4, iRegPNoSp tmp5)
+%{
+  predicate(((StrCompNode*)n)->encoding() == StrIntrinsicNode::UU);
+  match(Set result (StrComp (Binary str1 cnt1) (Binary str2 cnt2)));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4, TEMP tmp5);
+
+  ins_cost(10 * DEFAULT_COST);
+  format %{ "String Compare $str1, $cnt1, $str2, $cnt2 -> $result\t# @string_compareUU" %}
+  ins_encode %{
+    __ string_compare($str1$$Register, $cnt1$$Register, $str2$$Register, $cnt2$$Register,
+                      $result$$Register, $tmp1$$Register, $tmp2$$Register, $tmp3$$Register,
+                      $tmp4$$Register, $tmp5$$Register, StrIntrinsicNode::UU);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
+instruct string_compareLU(iRegP str1, iRegI cnt1, iRegP str2, iRegI cnt2, iRegI result,
+                        iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4, iRegPNoSp tmp5)
+%{
+  predicate(((StrCompNode*)n)->encoding() == StrIntrinsicNode::LU);
+  match(Set result (StrComp (Binary str1 cnt1) (Binary str2 cnt2)));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4, TEMP tmp5);
+
+  ins_cost(10 * DEFAULT_COST);
+  format %{ "String Compare $str1, $cnt1, $str2, $cnt2 -> $result\t# @string_compareLU" %}
+  ins_encode %{
+    __ string_compare($str1$$Register, $cnt1$$Register, $str2$$Register, $cnt2$$Register,
+                      $result$$Register, $tmp1$$Register, $tmp2$$Register, $tmp3$$Register,
+                      $tmp4$$Register, $tmp5$$Register, StrIntrinsicNode::LU);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
+instruct string_compareUL(iRegP str1, iRegI cnt1, iRegP str2, iRegI cnt2, iRegI result,
+                        iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4, iRegPNoSp tmp5)
+%{
+  predicate(((StrCompNode*)n)->encoding() == StrIntrinsicNode::UL);
+  match(Set result (StrComp (Binary str1 cnt1) (Binary str2 cnt2)));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4, TEMP tmp5);
+
+  ins_cost(10 * DEFAULT_COST);
+  format %{ "String Compare $str1, $cnt1, $str2, $cnt2 -> $result\t# @string_compareUL" %}
+  ins_encode %{
+    __ string_compare($str1$$Register, $cnt1$$Register, $str2$$Register, $cnt2$$Register,
+                      $result$$Register, $tmp1$$Register, $tmp2$$Register, $tmp3$$Register,
+                      $tmp4$$Register, $tmp5$$Register, StrIntrinsicNode::UL);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
+instruct count_positives(iRegP ary, iRegI len, iRegI result,
+                         iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4)
+%{
+  match(Set result (CountPositives ary len));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4);
+
+  ins_cost(10 * DEFAULT_COST);
+  format %{ "count positives byte[] $ary, $len -> $result\t# @count_positives" %}
+  ins_encode %{
+    __ count_positives($ary$$Register, $len$$Register, $result$$Register,
+                       $tmp1$$Register, $tmp2$$Register, $tmp3$$Register, $tmp4$$Register);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
 instruct partialSubtypeCheck(iRegPNoSp result, iRegP sub, iRegP super, iRegPNoSp tmp1, iRegPNoSp tmp2)
 %{
   match(Set result (PartialSubtypeCheck sub super));

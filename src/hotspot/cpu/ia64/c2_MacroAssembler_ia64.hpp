@@ -78,4 +78,32 @@
   void fast_lock_lightweight(Register obj, Register box, Register tmp1, Register tmp2, Register tmp3);
   void fast_unlock_lightweight(Register obj, Register box, Register tmp1, Register tmp2, Register tmp3);
 
+  // ---- String and array intrinsics -------------------------------------------
+  //
+  // Word loops (ld8 with post-increment) where both operands start 8-byte
+  // aligned -- element 0 of a byte[] or char[] (base offset 16) -- since an
+  // unaligned ld8 traps. Scratch: t1, p6/p7.
+
+  // The inputs are only read; the routines work on copies in their temps.
+  // StrEquals (LL): cnt bytes at str1 and str2. result = 1 if equal, else 0.
+  void string_equals(Register str1, Register str2, Register cnt, Register result,
+                     Register tmp1, Register tmp2, Register tmp3, Register tmp4, Register tmp5);
+  // AryEq: two byte[] (elem_size 1) or char[] (2) oops, either may be null.
+  void arrays_equals(Register ary1, Register ary2, Register result,
+                     Register tmp1, Register tmp2, Register tmp3, Register tmp4, Register tmp5,
+                     int elem_size);
+  // StrComp: cnt1/cnt2 are byte lengths; ae is a StrIntrinsicNode::ArgEnc.
+  void string_compare(Register str1, Register cnt1, Register str2, Register cnt2, Register result,
+                      Register tmp1, Register tmp2, Register tmp3, Register tmp4, Register tmp5,
+                      int ae);
+  // CountPositives: len bytes at ary (any alignment). result = len if none
+  // is negative, else at most the index of the first negative byte.
+  void count_positives(Register ary, Register len, Register result,
+                       Register tmp1, Register tmp2, Register tmp3, Register tmp4);
+
+ private:
+  void equal_bytes(Register a1, Register a2, Register cnt, Register result,
+                   Register tmp1, Register tmp2);
+ public:
+
 #endif // CPU_IA64_C2_MACROASSEMBLER_IA64_HPP

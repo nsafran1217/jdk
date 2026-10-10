@@ -212,3 +212,221 @@ void C2_MacroAssembler::fast_unlock_lightweight(Register obj, Register box, Regi
   set_flags(this, false);
   bind(done);
 }
+
+// ---- String and array intrinsics -------------------------------------------
+
+// Compare cnt bytes (a 64-bit count) at a1 and a2, both 8-byte aligned:
+// result = 1 if equal, 0 if not. Kills a1, a2, cnt, tmp1, tmp2, t1.
+void C2_MacroAssembler::equal_bytes(Register a1, Register a2, Register cnt, Register result,
+                                    Register tmp1, Register tmp2) {
+  Label loop, tail, tail2, tail1, equal, done;
+  mov(result, zr);
+  shru_imm(t1, cnt, 3);                 // whole words
+  beqz(t1, tail);
+  bind(loop);
+  ld8_inc(tmp1, a1, 8);
+  ld8_inc(tmp2, a2, 8);
+  adds(t1, -1, t1);
+  cmp_ne(ptmp0, ptmp1, tmp1, tmp2);
+  br_cond(done, ptmp0);
+  bnez(t1, loop);
+  bind(tail);                           // 0-7 bytes left, still aligned
+  and_imm(t1, 4, cnt);
+  beqz(t1, tail2);
+  ld4_inc(tmp1, a1, 4);
+  ld4_inc(tmp2, a2, 4);
+  cmp_ne(ptmp0, ptmp1, tmp1, tmp2);
+  br_cond(done, ptmp0);
+  bind(tail2);
+  and_imm(t1, 2, cnt);
+  beqz(t1, tail1);
+  ld2_inc(tmp1, a1, 2);
+  ld2_inc(tmp2, a2, 2);
+  cmp_ne(ptmp0, ptmp1, tmp1, tmp2);
+  br_cond(done, ptmp0);
+  bind(tail1);
+  and_imm(t1, 1, cnt);
+  beqz(t1, equal);
+  Assembler::ld1(tmp1, a1);
+  Assembler::ld1(tmp2, a2);
+  cmp_ne(ptmp0, ptmp1, tmp1, tmp2);
+  br_cond(done, ptmp0);
+  bind(equal);
+  mov_immediate(result, 1);
+  bind(done);
+}
+
+void C2_MacroAssembler::string_equals(Register str1, Register str2, Register cnt, Register result,
+                                      Register tmp1, Register tmp2, Register tmp3, Register tmp4,
+                                      Register tmp5) {
+  mov(tmp3, str1);
+  mov(tmp4, str2);
+  sxt4(tmp5, cnt);                      // a lazy int
+  equal_bytes(tmp3, tmp4, tmp5, result, tmp1, tmp2);
+}
+
+void C2_MacroAssembler::arrays_equals(Register ary1, Register ary2, Register result,
+                                      Register tmp1, Register tmp2, Register tmp3, Register tmp4,
+                                      Register tmp5, int elem_size) {
+  const int length_offset = arrayOopDesc::length_offset_in_bytes();
+  const int base_offset = arrayOopDesc::base_offset_in_bytes(elem_size == 1 ? T_BYTE : T_CHAR);
+  guarantee(is_aligned(base_offset, BytesPerLong), "word loop needs aligned array data");
+  Label same, done;
+  mov(result, zr);
+  cmp_eq(ptmp0, ptmp1, ary1, ary2);
+  br_cond(same, ptmp0);
+  beqz(ary1, done);
+  beqz(ary2, done);
+  adds(tmp1, length_offset, ary1);
+  adds(tmp2, length_offset, ary2);
+  Assembler::ld4(tmp1, tmp1);
+  Assembler::ld4(tmp2, tmp2);
+  cmp4_ne(ptmp0, ptmp1, tmp1, tmp2);
+  br_cond(done, ptmp0);
+  if (elem_size == 2) {
+    add(tmp1, tmp1, tmp1);              // bytes (ld4 zero-extends)
+  }
+  adds(tmp4, base_offset, ary1);
+  adds(tmp5, base_offset, ary2);
+  equal_bytes(tmp4, tmp5, tmp1, result, tmp2, tmp3);
+  j(done);
+  bind(same);
+  mov_immediate(result, 1);
+  bind(done);
+}
+
+// The Java semantics (StringLatin1/StringUTF16.compareTo...): the first
+// differing chars' difference, else the difference of the lengths in chars.
+void C2_MacroAssembler::string_compare(Register str1_in, Register cnt1_in,
+                                       Register str2_in, Register cnt2_in, Register result,
+                                       Register tmp1, Register tmp2, Register tmp3, Register tmp4,
+                                       Register tmp5, int ae) {
+  const bool str1_isL = (ae == StrIntrinsicNode::LL || ae == StrIntrinsicNode::LU);
+  const bool str2_isL = (ae == StrIntrinsicNode::LL || ae == StrIntrinsicNode::UL);
+  const Register str1 = tmp4, str2 = tmp5, cnt1 = tmp1, cnt2 = tmp2;
+  Label done, elem_loop, elem_diff, word_diff;
+  mov(str1, str1_in);
+  mov(str2, str2_in);
+  sxt4(cnt1, cnt1_in);
+  sxt4(cnt2, cnt2_in);
+  if (!str1_isL) shr_imm(cnt1, cnt1, 1);    // chars
+  if (!str2_isL) shr_imm(cnt2, cnt2, 1);
+  sub(result, cnt1, cnt2);
+  cmp_lt(ptmp0, ptmp1, cnt1, cnt2);         // tmp3 = min(cnt1, cnt2), in chars
+  mov(tmp3, cnt1, ptmp0);
+  mov(tmp3, cnt2, ptmp1);
+  beqz(tmp3, done);
+
+  if (str1_isL == str2_isL) {
+    const int esize = str1_isL ? 1 : 2;
+    Label word_loop, tail;
+    if (esize == 2) add(tmp3, tmp3, tmp3);  // bytes
+    shru_imm(t1, tmp3, 3);
+    beqz(t1, tail);
+    bind(word_loop);
+    ld8_inc(tmp1, str1, 8);
+    ld8_inc(tmp2, str2, 8);
+    adds(t1, -1, t1);
+    cmp_ne(ptmp0, ptmp1, tmp1, tmp2);
+    br_cond(word_diff, ptmp0);
+    bnez(t1, word_loop);
+    bind(tail);
+    and_imm(tmp3, 7, tmp3);                 // bytes left
+    if (esize == 2) shru_imm(tmp3, tmp3, 1);  // chars left
+    beqz(tmp3, done);
+    bind(elem_loop);
+    if (esize == 1) {
+      ld1_inc(tmp1, str1, 1);
+      ld1_inc(tmp2, str2, 1);
+    } else {
+      ld2_inc(tmp1, str1, 2);
+      ld2_inc(tmp2, str2, 2);
+    }
+    adds(tmp3, -1, tmp3);
+    cmp_ne(ptmp0, ptmp1, tmp1, tmp2);
+    br_cond(elem_diff, ptmp0);
+    bnez(tmp3, elem_loop);
+    j(done);
+
+    // The lowest differing element of two little-endian words: shift both
+    // right to it and zero-extend.
+    bind(word_diff);
+    xor_(t1, tmp1, tmp2);
+    adds(tmp3, -1, t1);
+    andcm(tmp3, tmp3, t1);                  // the bits below the lowest set bit
+    popcnt(tmp3, tmp3);
+    and_imm(tmp3, esize == 1 ? -8 : -16, tmp3);
+    shru(tmp1, tmp1, tmp3);
+    shru(tmp2, tmp2, tmp3);
+    if (esize == 1) {
+      zxt1(tmp1, tmp1);
+      zxt1(tmp2, tmp2);
+    } else {
+      zxt2(tmp1, tmp1);
+      zxt2(tmp2, tmp2);
+    }
+  } else {
+    // Mixed encodings: one char at a time (ld1 and ld2 zero-extend).
+    bind(elem_loop);
+    if (str1_isL) {
+      ld1_inc(tmp1, str1, 1);
+      ld2_inc(tmp2, str2, 2);
+    } else {
+      ld2_inc(tmp1, str1, 2);
+      ld1_inc(tmp2, str2, 1);
+    }
+    adds(tmp3, -1, tmp3);
+    cmp_ne(ptmp0, ptmp1, tmp1, tmp2);
+    br_cond(elem_diff, ptmp0);
+    bnez(tmp3, elem_loop);
+    j(done);
+  }
+  bind(elem_diff);                          // word_diff falls in here
+  sub(result, tmp1, tmp2);
+  bind(done);
+}
+
+void C2_MacroAssembler::count_positives(Register ary_in, Register len_in, Register result,
+                                        Register tmp1, Register tmp2, Register tmp3,
+                                        Register tmp4) {
+  const Register ary = tmp3, len = tmp4;
+  Label head, words, word_loop, tail, tail_loop, done;
+  mov(ary, ary_in);
+  sxt4(len, len_in);
+  mov(result, zr);
+  // Bytes until ary is 8-byte aligned.
+  bind(head);
+  cmp_eq(ptmp0, ptmp1, result, len);
+  br_cond(done, ptmp0);
+  and_imm(t1, 7, ary);
+  beqz(t1, words);
+  ld1_inc(tmp1, ary, 1);
+  and_imm(tmp1, -128, tmp1);                // the sign bit (zero-extended load)
+  bnez(tmp1, done);
+  adds(result, 1, result);
+  j(head);
+  // Whole words: stop at the first word with a negative byte (the count
+  // then names the word's first byte, which the contract allows).
+  bind(words);
+  mov_immediate(tmp2, (int64_t)0x8080808080808080ULL);
+  bind(word_loop);
+  sub(t1, len, result);
+  mov_immediate(tmp1, 8);
+  cmp_lt(ptmp0, ptmp1, t1, tmp1);
+  br_cond(tail, ptmp0);
+  ld8_inc(tmp1, ary, 8);
+  and_(tmp1, tmp1, tmp2);
+  bnez(tmp1, done);
+  adds(result, 8, result);
+  j(word_loop);
+  bind(tail);
+  bind(tail_loop);
+  cmp_eq(ptmp0, ptmp1, result, len);
+  br_cond(done, ptmp0);
+  ld1_inc(tmp1, ary, 1);
+  and_imm(tmp1, -128, tmp1);
+  bnez(tmp1, done);
+  adds(result, 1, result);
+  j(tail_loop);
+  bind(done);
+}
