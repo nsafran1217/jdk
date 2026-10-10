@@ -287,6 +287,10 @@ class MacroAssembler : public Assembler {
   // and friends). The direct analogue of PPC ELFv1's function_entry(). The gp
   // stored is libjvm's own; generated code never uses gp itself (3.4).
   address function_entry();
+  // Whether a, in the code cache, is such a descriptor: a stub C++ can call
+  // through a function pointer, whose callers in generated code must enter
+  // it through the descriptor too (or skip it), never execute it.
+  static bool is_function_entry(address a);
 
   // ---- frames -------------------------------------------------------------
   //
@@ -523,6 +527,11 @@ class MacroAssembler : public Assembler {
                                Register method_result, Register scan_tmp,
                                Label& L_no_such_interface, bool return_method = true);
 
+  // C2's loop poll (ia64.ad safePoint): ld8 t1 = [poll], a bundle of its own
+  // with a poll relocation. poll is the thread's polling page, which faults
+  // when armed; NativeInstruction::is_safepoint_poll recognises the bundle.
+  void read_polling_page(Register poll);
+
   // Thread-local safepoint poll. at_return compares against the stack
   // watermark (fp, or sp in an nmethod) instead of testing the poll bit.
   void safepoint_poll(Label& slow_path, bool at_return, bool acquire, bool in_nmethod,
@@ -563,6 +572,9 @@ class MacroAssembler : public Assembler {
   // Oops and metadata embedded in code (relocated movl immediates).
   void movoop(Register dst, jobject obj);
   void mov_metadata(Register dst, Metadata* obj);
+  // The narrow (encoded) klass in a movl, with a metadata relocation naming
+  // the Klass*. metadata_Relocation::pd_fix_value leaves the immediate alone.
+  void set_narrow_klass(Register dst, Klass* k);
 
   // ---- debugging -----------------------------------------------------------
 

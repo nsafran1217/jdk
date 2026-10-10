@@ -44,34 +44,39 @@
 //                     the FPRs are described.
 //   sp + fr_spill_off f8-f31 as 16-byte stf.spill images: what is restored,
 //                     bit-exact for any register value
-//   sp + gr_off       r8-r11, r14-r31
+//   sp + gr_off       r6-r11, r14-r31
 //   sp + pr_off       all predicates (a safepoint may fall between a C1
 //                     compare and the branch reading p10/p11)
 //   sp + 0            16-byte psABI scratch
 //
+// r6/r7 are preserved by C callees, but C2 allocates them (C2-DESIGN.md
+// section 1), so they are saved and described like the others: GC must find
+// and update an oop held there, and deoptimization must read a value from
+// there.
+//
 // Not saved: r0, r1 (gp, scratch and never live in generated code), r2/r3 (the
-// MacroAssembler temporaries this code uses), r4-r7 (preserved by C), r12 sp,
+// MacroAssembler temporaries this code uses), r4/r5 (fp and Rthread), r12 sp,
 // r13 tp, out0-out7, f2-f7 (internal temporaries), f0/f1.
 //
 // Shared by sharedRuntime_ia64.cpp (resolve, safepoint and deopt blobs) and
 // c1_Runtime1_ia64.cpp (the C1 runtime stubs).
 class RegisterSaver {
  public:
-  static const int gr_count = 22;
+  static const int gr_count = 24;
   static const int fr_first = 8;
   static const int fr_count = 24;   // f8-f31
 
   enum {
     pr_off       = 16,
     gr_off       = 24,
-    fr_spill_off = 208,                                  // align_up(gr_off + 22 * 8, 16)
-    fr_dbl_off   = fr_spill_off + fr_count * 16,         // 592
-    save_bytes   = fr_dbl_off + fr_count * 8             // 784
+    fr_spill_off = 224,                                  // align_up(gr_off + 24 * 8, 16)
+    fr_dbl_off   = fr_spill_off + fr_count * 16,         // 608
+    save_bytes   = fr_dbl_off + fr_count * 8             // 800
   };
 
   static int gr_at(int i) {
-    static const int grs[gr_count] = { 8, 9, 10, 11, 14, 15, 16, 17, 18, 19, 20,
-                                       21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31 };
+    static const int grs[gr_count] = { 6, 7, 8, 9, 10, 11, 14, 15, 16, 17, 18, 19,
+                                       20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31 };
     return grs[i];
   }
   static int gr_offset_in_bytes(Register r) {

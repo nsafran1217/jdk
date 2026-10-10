@@ -270,8 +270,13 @@ bool PosixSignals::pd_hotspot_signal_handler(int sig, siginfo_t* info,
         stub = SharedRuntime::get_handle_wrong_method_stub();
       } else if (sig == SIGSEGV &&
                  MacroAssembler::uses_implicit_null_check((void*)addr)) {
-          // Determination of interpreter/vtable stub/compiled code null exception
-          stub = SharedRuntime::continuation_for_implicit_exception(thread, pc, SharedRuntime::IMPLICIT_NULL);
+          // Determination of interpreter/vtable stub/compiled code null exception.
+          // The kernel reports the faulting instruction as its bundle plus the
+          // slot number (cr.iip + psr.ri), and code records implicit-exception
+          // pcs as bundle addresses: C2's memory nodes are one bundle,
+          // { adds ;; ld/st }, and fault in slot 1.
+          stub = SharedRuntime::continuation_for_implicit_exception(thread, align_down(pc, BytesPerBundle),
+                                                                    SharedRuntime::IMPLICIT_NULL);
       }
       // IA-64 has no integer divide instruction, so there is no hardware
       // divide-by-zero trap to map: generated code tests the divisor itself.

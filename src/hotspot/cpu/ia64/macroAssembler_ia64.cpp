@@ -261,6 +261,12 @@ void MacroAssembler::far_jump(address entry, PredicateRegister qp) {
   br_cond(btmp, qp);
 }
 
+bool MacroAssembler::is_function_entry(address a) {
+  if (!is_aligned(a, BytesPerBundle)) return false;
+  const address* fd = (const address*)a;
+  return fd[0] == a + 2 * wordSize && fd[1] == libjvm_gp();
+}
+
 address MacroAssembler::function_entry() {
   // The descriptor is data in the instruction stream; it is 16 bytes, so the
   // code that follows stays bundle-aligned. The entry it records is absolute,
@@ -850,6 +856,13 @@ void MacroAssembler::lookup_interface_method(Register recv_klass, Register intf_
   }
 }
 
+void MacroAssembler::read_polling_page(Register poll) {
+  relocate(relocInfo::poll_type);   // also closes any open bundle
+  // A barrier bundle: nothing joins its group, so the fault names this
+  // bundle and resuming at the next one skips exactly the poll.
+  emit_m(ia64::Ld8(t1->encoding(), poll->encoding()));
+}
+
 void MacroAssembler::safepoint_poll(Label& slow_path, bool at_return, bool acquire, bool in_nmethod, Register tmp) {
   if (acquire) {
     lea(tmp, Address(Rthread, JavaThread::polling_word_offset()));
@@ -1035,6 +1048,13 @@ void MacroAssembler::mov_metadata(Register dst, Metadata* obj) {
   movl(dst, (uint64_t)(uintptr_t)obj);
 }
 
+void MacroAssembler::set_narrow_klass(Register dst, Klass* k) {
+  assert(UseCompressedClassPointers, "only for compressed klass pointers");
+  int index = oop_recorder()->find_index(k);
+  relocate(metadata_Relocation::spec(index));
+  movl(dst, (uint64_t)CompressedKlassPointers::encode(k));
+}
+
 // ---- lightweight locking ----------------------------------------------------
 //
 // After riscv (MacroAssembler::lightweight_lock/unlock). The memory ordering
@@ -1061,8 +1081,9 @@ void MacroAssembler::lightweight_lock(Register basic_lock, Register obj, Registe
   assert(oopDesc::mark_offset_in_bytes() == 0, "the cmpxchg below addresses the mark word as obj");
   ld8(mark, obj);
 
-  if (UseObjectMonitorTable) {
+  if (UseObjectMonitorTable && basic_lock != noreg) {
     // Clear cache in case fast locking succeeds or we need to take the slow-path.
+    // (C2's caller passes noreg: its box is a BasicLock, cleared there.)
     st8(Address(basic_lock, BasicObjectLock::lock_offset() +
                             in_ByteSize(BasicLock::object_monitor_cache_offset_in_bytes())), zr, t);
   }

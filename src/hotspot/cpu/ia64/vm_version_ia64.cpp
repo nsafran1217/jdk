@@ -151,6 +151,8 @@ void VM_Version::initialize() {
   // Prefetching (lfetch) exists but no stub uses it yet; see
   // prefetch_linux_ia64.inline.hpp.
   FLAG_SET_DEFAULT(AllocatePrefetchDistance, 0);
+  // ... nor does C2 (no PrefetchAllocation rule in ia64.ad yet).
+  FLAG_SET_DEFAULT(AllocatePrefetchStyle, 0);
 }
 
 void VM_Version::initialize_cpu_information(void) {

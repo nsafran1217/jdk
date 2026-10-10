@@ -69,10 +69,15 @@ bool NativeInstruction::is_jump_or_nop() {
   return is_nop() || is_jump();
 }
 
-// This port polls for safepoints through a thread-local word (a load and a
-// tbit), never through a polling page, so no instruction is a "poll" in
-// the page-fault sense.
+// The interpreter and C1 poll a thread-local word (a load and a tbit), which
+// never faults. C2's loop polls load from the thread's polling page
+// (MacroAssembler::read_polling_page): ld8 t1 = [poll] alone in a bundle.
 bool NativeInstruction::is_safepoint_poll() {
+  for (int r = 0; r < Register::number_of_registers; r++) {
+    if (bundle_equals(addr_at(0), ia64::BundleM(ia64::Ld8(t1->encoding(), r)))) {
+      return true;
+    }
+  }
   return false;
 }
 
