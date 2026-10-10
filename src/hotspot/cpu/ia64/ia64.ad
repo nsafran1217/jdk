@@ -2374,11 +2374,21 @@ opclass iRegIorL2I(iRegI, iRegL2I);
 //----------PIPELINE-----------------------------------------------------------
 // Rules which define the behavior of the target architectures pipeline.
 //
-// No machine model yet (OptoScheduling is off): one pipeline class per
-// broad kind of node, with fixed latencies. The Itanium 2 model -- bundles,
-// dispersal to M0-M3/I0-I1/F0-F1/B0-B2, itanium2.md latencies -- is C2-4
-// (C2-DESIGN.md section 11). Until then instruction_unit_size is the bundle,
-// so Pipeline::requires_bundling() is false and C2 does not form bundles.
+// A latency model of Itanium 2 (Montecito/Tukwila) for OptoScheduling: GCM
+// and LCM order nodes by these latencies, and the post-allocation scheduler
+// orders each block for them. Bundles are not formed here:
+// instruction_unit_size stays the bundle, so Pipeline::requires_bundling()
+// is false, and the emit-time packer (UseC2BundlePacking) forms the
+// instruction groups (BUNDLING.md, C2-DESIGN.md section 11).
+//
+// A node usually emits a short dependent sequence (an address adds, the
+// access, an extension), so each class has a fixed latency: the cycles from
+// the node's first instruction to its result, from the unit latencies of
+// GCC's config/ia64/itanium2.md (ialu, ishf, ld 1; mmshf 2; fmac, fmisc,
+// fcvtfx 4; tofr, frfr 5; fld 6). Resources model the issue ports: integer
+// loads on M0-M1, stores on M2-M3, A-type ALU operations on any M or I port,
+// I-only operations (shifts, extensions, mux, popcnt) on I0-I1, FP on F0-F1,
+// branches on B0-B2. Two bundles issue per cycle.
 
 pipeline %{
 
@@ -2386,6 +2396,7 @@ attributes %{
   // Every node emits whole 16-byte bundles; a node may emit several.
   variable_size_instructions;
   max_instructions_per_bundle = 3;
+  max_bundles_per_cycle = 2;
   instruction_unit_size = 16;
   instruction_fetch_unit_size = 32;  // two bundles per cycle
   instruction_fetch_units = 1;
@@ -2398,8 +2409,10 @@ attributes %{
 // Resources are the functional units available to the machine
 
 resources( M0, M1, M2, M3, I0, I1, F0, F1, B0, B1, B2,
-           MEM = M0 | M1 | M2 | M3,
-           INT = I0 | I1,
+           MLD = M0 | M1,
+           MST = M2 | M3,
+           ALU = M0 | M1 | M2 | M3 | I0 | I1,
+           IU  = I0 | I1,
            FPU = F0 | F1,
            BR  = B0 | B1 | B2 );
 
@@ -2425,46 +2438,123 @@ pipe_class pipe_class_empty()
   fixed_latency(0);
 %}
 
+// add, sub, logical, shladd, mov, an immediate mov: one A-type operation.
 pipe_class ialu_reg_reg(iRegI dst, iRegI src1, iRegI src2)
 %{
   single_instruction;
-  dst  : S3(write);
-  src1 : S2(read);
-  src2 : S2(read);
-  INT  : S2;
+  fixed_latency(1);
+  ALU : S1;
 %}
 
 pipe_class ialu_reg(iRegI dst, iRegI src)
 %{
   single_instruction;
-  dst  : S3(write);
-  src  : S2(read);
-  INT  : S2;
+  fixed_latency(1);
+  ALU : S1;
 %}
 
 pipe_class ialu_imm(iRegI dst)
 %{
   single_instruction;
-  dst  : S3(write);
-  INT  : S2;
+  fixed_latency(1);
+  ALU : S1;
 %}
 
+// movl: an L+X slot pair, executed on an I port.
+pipe_class ialu_movl(iRegL dst)
+%{
+  instruction_count(2);
+  fixed_latency(1);
+  IU : S1;
+%}
+
+// One I-unit operation: an immediate shift, extr, dep, sxt4/zxt4, shrp.
+pipe_class ishift_reg(iRegI dst, iRegI src)
+%{
+  single_instruction;
+  fixed_latency(1);
+  IU : S1;
+%}
+
+// Two dependent operations: an extension or count mask, then the shift or
+// the shladd; a compare, then the predicated move (cmov, cmpLTMask).
+pipe_class ialu_reg_reg_2(iRegI dst, iRegI src1, iRegI src2)
+%{
+  instruction_count(2);
+  fixed_latency(2);
+  IU : S1;
+%}
+
+// min/max: cmp4, then two predicated moves.
+pipe_class ialu_minmax(iRegI dst, iRegI src1, iRegI src2)
+%{
+  instruction_count(3);
+  fixed_latency(2);
+  ALU : S1;
+%}
+
+// Multimedia operations (popcnt, mux1) and their extensions or shifts.
+pipe_class imm_reg(iRegI dst, iRegI src)
+%{
+  instruction_count(2);
+  fixed_latency(3);
+  IU : S1;
+%}
+
+// adds, then ld: the loaded value, from L1D.
 pipe_class pipe_class_memory()
 %{
-  single_instruction;
-  fixed_latency(4);
-%}
-
-pipe_class pipe_class_compare()
-%{
-  single_instruction;
+  instruction_count(2);
   fixed_latency(2);
+  MLD : S1;
 %}
 
+// adds, ld, then sxt (signed sub-word and int-to-long loads).
+pipe_class iload_ext()
+%{
+  instruction_count(3);
+  fixed_latency(3);
+  MLD : S1;
+%}
+
+// adds, then ldf: FP loads come from L2.
+pipe_class fload()
+%{
+  instruction_count(2);
+  fixed_latency(7);
+  MLD : S1;
+%}
+
+// adds, then st.
+pipe_class istore()
+%{
+  instruction_count(2);
+  fixed_latency(1);
+  MST : S1;
+%}
+
+// fma, fms, fnma, fmerge, fnorm.
 pipe_class fp_default()
 %{
   single_instruction;
   fixed_latency(4);
+  FPU : S1;
+%}
+
+// setf or getf, or a movl and setf.
+pipe_class fp_xfer()
+%{
+  instruction_count(2);
+  fixed_latency(6);
+  FPU : S1;
+%}
+
+// setf.sig, fcvt.xf, then fnorm.
+pipe_class fp_cvt()
+%{
+  instruction_count(3);
+  fixed_latency(13);
+  FPU : S1;
 %}
 
 pipe_class pipe_branch()
@@ -2473,10 +2563,34 @@ pipe_class pipe_branch()
   BR   : S1;
 %}
 
+// The fused compare and branch: cmp, then br.
+pipe_class pipe_cmp_branch()
+%{
+  instruction_count(2);
+  BR   : S1;
+%}
+
 pipe_class pipe_slow()
 %{
   multiple_bundles;
   fixed_latency(16);
+%}
+
+// setf.sig, xma, getf.sig (also clz and ctz through the FP unit).
+pipe_class pipe_mul()
+%{
+  multiple_bundles;
+  fixed_latency(14);
+  FPU : S1;
+%}
+
+// Inline integer and FP divide, remainder and square root: frcpa or frsqrta
+// and a chain of fma steps.
+pipe_class pipe_div()
+%{
+  multiple_bundles;
+  fixed_latency(40);
+  FPU : S1;
 %}
 
 pipe_class pipe_class_call()
@@ -2567,7 +2681,7 @@ instruct loadConP(iRegPNoSp dst, immP con)
     }
   %}
 
-  ins_pipe(ialu_imm);
+  ins_pipe(ialu_movl);
 %}
 
 instruct loadConP0(iRegPNoSp dst, immP0 con)
@@ -2612,7 +2726,7 @@ instruct loadConNKlass(iRegN dst, immNKlass con)
     __ set_narrow_klass($dst$$Register, (Klass*)$con$$constant);
   %}
 
-  ins_pipe(ialu_imm);
+  ins_pipe(ialu_movl);
 %}
 
 // FP constants: the bits in a GR, then setf (C2-DESIGN.md section 6).
@@ -2628,7 +2742,7 @@ instruct loadConF(fRegF dst, immF con)
     __ setf_s($dst$$FloatRegister, t1);
   %}
 
-  ins_pipe(fp_default);
+  ins_pipe(fp_xfer);
 %}
 
 instruct loadConF0(fRegF dst, immF0 con)
@@ -2657,7 +2771,7 @@ instruct loadConD(fRegD dst, immD con)
     __ setf_d($dst$$FloatRegister, t1);
   %}
 
-  ins_pipe(fp_default);
+  ins_pipe(fp_xfer);
 %}
 
 instruct loadConD0(fRegD dst, immD0 con)
@@ -2794,7 +2908,7 @@ instruct addP_reg_convI2L_lshl(iRegPNoSp dst, iRegP base, iRegIorL2I index, immI
     __ shladd($dst$$Register, t1, (int)$scale$$constant, $base$$Register);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct subI_reg_reg(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
@@ -2867,7 +2981,7 @@ instruct mulI(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
     __ mul($dst$$Register, $src1$$Register, $src2$$Register);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_mul);
 %}
 
 instruct mulL(iRegL dst, iRegL src1, iRegL src2)
@@ -2881,7 +2995,7 @@ instruct mulL(iRegL dst, iRegL src1, iRegL src2)
     __ mul($dst$$Register, $src1$$Register, $src2$$Register);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_mul);
 %}
 
 // Divide and remainder: java_div_rem, GCC's divide sequence through the FP
@@ -2900,7 +3014,7 @@ instruct divI(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
     __ java_div_rem($dst$$Register, t2, t3, false);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_div);
 %}
 
 instruct modI(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
@@ -2916,7 +3030,7 @@ instruct modI(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
     __ java_div_rem($dst$$Register, t2, t3, true);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_div);
 %}
 
 instruct divL(iRegL dst, iRegL src1, iRegL src2)
@@ -2930,7 +3044,7 @@ instruct divL(iRegL dst, iRegL src1, iRegL src2)
     __ java_div_rem($dst$$Register, $src1$$Register, $src2$$Register, false);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_div);
 %}
 
 instruct modL(iRegL dst, iRegL src1, iRegL src2)
@@ -2946,7 +3060,7 @@ instruct modL(iRegL dst, iRegL src1, iRegL src2)
     __ java_div_rem($dst$$Register, t2, t3, true);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_div);
 %}
 
 // Unsigned divide and remainder (the divisor is non-zero: C2 tests it). An
@@ -2964,7 +3078,7 @@ instruct UdivI(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
     __ java_div_rem($dst$$Register, t2, t3, false);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_div);
 %}
 
 instruct UmodI(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
@@ -2980,7 +3094,7 @@ instruct UmodI(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
     __ java_div_rem($dst$$Register, t2, t3, true);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_div);
 %}
 
 instruct UdivL(iRegL dst, iRegL src1, iRegL src2)
@@ -2994,7 +3108,7 @@ instruct UdivL(iRegL dst, iRegL src1, iRegL src2)
     __ java_udiv_rem($dst$$Register, $src1$$Register, $src2$$Register, false);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_div);
 %}
 
 instruct UmodL(iRegL dst, iRegL src1, iRegL src2)
@@ -3010,7 +3124,7 @@ instruct UmodL(iRegL dst, iRegL src1, iRegL src2)
     __ java_udiv_rem($dst$$Register, t2, t3, true);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_div);
 %}
 
 // Logical operations
@@ -3203,7 +3317,7 @@ instruct lShiftI_reg_reg(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
     __ shl($dst$$Register, $src1$$Register, t1);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct lShiftI_reg_imm(iRegI dst, iRegIorL2I src1, immI src2)
@@ -3217,7 +3331,7 @@ instruct lShiftI_reg_imm(iRegI dst, iRegIorL2I src1, immI src2)
     __ shl_imm($dst$$Register, $src1$$Register, (uint32_t)$src2$$constant & 0x1f);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(ishift_reg);
 %}
 
 instruct rShiftI_reg_reg(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
@@ -3233,7 +3347,7 @@ instruct rShiftI_reg_reg(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
     __ shr($dst$$Register, t2, t1);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct rShiftI_reg_imm(iRegI dst, iRegIorL2I src1, immI src2)
@@ -3248,7 +3362,7 @@ instruct rShiftI_reg_imm(iRegI dst, iRegIorL2I src1, immI src2)
     __ extr($dst$$Register, $src1$$Register, s, 32 - s);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(ishift_reg);
 %}
 
 instruct urShiftI_reg_reg(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
@@ -3264,7 +3378,7 @@ instruct urShiftI_reg_reg(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
     __ shru($dst$$Register, t2, t1);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct urShiftI_reg_imm(iRegI dst, iRegIorL2I src1, immI src2)
@@ -3279,7 +3393,7 @@ instruct urShiftI_reg_imm(iRegI dst, iRegIorL2I src1, immI src2)
     __ extr_u($dst$$Register, $src1$$Register, s, 32 - s);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(ishift_reg);
 %}
 
 instruct lShiftL_reg_reg(iRegL dst, iRegL src1, iRegIorL2I src2)
@@ -3294,7 +3408,7 @@ instruct lShiftL_reg_reg(iRegL dst, iRegL src1, iRegIorL2I src2)
     __ shl($dst$$Register, $src1$$Register, t1);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct lShiftL_reg_imm(iRegL dst, iRegL src1, immI src2)
@@ -3308,7 +3422,7 @@ instruct lShiftL_reg_imm(iRegL dst, iRegL src1, immI src2)
     __ shl_imm($dst$$Register, $src1$$Register, (uint32_t)$src2$$constant & 0x3f);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(ishift_reg);
 %}
 
 instruct rShiftL_reg_reg(iRegL dst, iRegL src1, iRegIorL2I src2)
@@ -3323,7 +3437,7 @@ instruct rShiftL_reg_reg(iRegL dst, iRegL src1, iRegIorL2I src2)
     __ shr($dst$$Register, $src1$$Register, t1);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct rShiftL_reg_imm(iRegL dst, iRegL src1, immI src2)
@@ -3337,7 +3451,7 @@ instruct rShiftL_reg_imm(iRegL dst, iRegL src1, immI src2)
     __ shr_imm($dst$$Register, $src1$$Register, (uint32_t)$src2$$constant & 0x3f);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(ishift_reg);
 %}
 
 instruct urShiftL_reg_reg(iRegL dst, iRegL src1, iRegIorL2I src2)
@@ -3352,7 +3466,7 @@ instruct urShiftL_reg_reg(iRegL dst, iRegL src1, iRegIorL2I src2)
     __ shru($dst$$Register, $src1$$Register, t1);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct urShiftL_reg_imm(iRegL dst, iRegL src1, immI src2)
@@ -3366,7 +3480,7 @@ instruct urShiftL_reg_imm(iRegL dst, iRegL src1, immI src2)
     __ shru_imm($dst$$Register, $src1$$Register, (uint32_t)$src2$$constant & 0x3f);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(ishift_reg);
 %}
 
 // A pointer shifted right (card-table address computation).
@@ -3381,7 +3495,7 @@ instruct urShiftP_reg_imm(iRegL dst, iRegP src1, immI src2)
     __ shru_imm($dst$$Register, $src1$$Register, (uint32_t)$src2$$constant & 0x3f);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(ishift_reg);
 %}
 
 // (p < q) ? -1 : 0
@@ -3398,7 +3512,7 @@ instruct cmpLTMask_reg_reg(iRegI dst, iRegIorL2I p, iRegIorL2I q)
     __ adds($dst$$Register, -1, zr, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 // (p < 0) ? -1 : 0: the sign bit, extracted signed.
@@ -3413,7 +3527,7 @@ instruct cmpLTMask_reg_zero(iRegI dst, iRegIorL2I p, immI0 zero)
     __ extr($dst$$Register, $p$$Register, 31, 1);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 // ============================================================================
@@ -3432,7 +3546,7 @@ instruct popCountI(iRegI dst, iRegIorL2I src)
     __ popcnt($dst$$Register, t1);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(imm_reg);
 %}
 
 instruct popCountL(iRegI dst, iRegL src)
@@ -3447,7 +3561,7 @@ instruct popCountL(iRegI dst, iRegL src)
     __ popcnt($dst$$Register, $src$$Register);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(imm_reg);
 %}
 
 // The exponent trick (Firefox's Clz): setf.sig makes the bits a register-
@@ -3471,7 +3585,7 @@ instruct countLeadingZerosI(iRegI dst, iRegIorL2I src)
     __ adds($dst$$Register, 32, zr, ptmp0);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_mul);
 %}
 
 instruct countLeadingZerosL(iRegI dst, iRegL src)
@@ -3491,7 +3605,7 @@ instruct countLeadingZerosL(iRegI dst, iRegL src)
     __ adds($dst$$Register, 64, zr, ptmp0);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_mul);
 %}
 
 // ctz(x) = popcnt((x & -x) - 1); for a long, x == 0 gives popcnt(-1) = 64.
@@ -3512,7 +3626,7 @@ instruct countTrailingZerosI(iRegI dst, iRegIorL2I src)
     __ adds($dst$$Register, 32, zr, ptmp0);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_mul);
 %}
 
 instruct countTrailingZerosL(iRegI dst, iRegL src)
@@ -3529,7 +3643,7 @@ instruct countTrailingZerosL(iRegI dst, iRegL src)
     __ popcnt($dst$$Register, t0);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_mul);
 %}
 
 instruct reverseBytesL(iRegL dst, iRegL src)
@@ -3543,7 +3657,7 @@ instruct reverseBytesL(iRegL dst, iRegL src)
     __ mux1_rev($dst$$Register, $src$$Register);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(imm_reg);
 %}
 
 instruct reverseBytesI(iRegI dst, iRegIorL2I src)
@@ -3558,7 +3672,7 @@ instruct reverseBytesI(iRegI dst, iRegIorL2I src)
     __ shr_imm($dst$$Register, t1, 32);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(imm_reg);
 %}
 
 instruct reverseBytesUS(iRegI dst, iRegIorL2I src)
@@ -3573,7 +3687,7 @@ instruct reverseBytesUS(iRegI dst, iRegIorL2I src)
     __ shru_imm($dst$$Register, t1, 48);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(imm_reg);
 %}
 
 instruct reverseBytesS(iRegI dst, iRegIorL2I src)
@@ -3588,7 +3702,7 @@ instruct reverseBytesS(iRegI dst, iRegIorL2I src)
     __ shr_imm($dst$$Register, t1, 48);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(imm_reg);
 %}
 
 // Rotates. A long rotates with shrp (r2 == r3); an int rotates the doubled
@@ -3605,7 +3719,7 @@ instruct rorL_imm(iRegL dst, iRegL src, immI shift)
     __ shrp($dst$$Register, $src$$Register, $src$$Register, (uint32_t)$shift$$constant & 63);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(ishift_reg);
 %}
 
 instruct rolL_imm(iRegL dst, iRegL src, immI shift)
@@ -3619,7 +3733,7 @@ instruct rolL_imm(iRegL dst, iRegL src, immI shift)
     __ shrp($dst$$Register, $src$$Register, $src$$Register, (uint32_t)(-$shift$$constant) & 63);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(ishift_reg);
 %}
 
 instruct rorI_imm(iRegI dst, iRegIorL2I src, immI shift)
@@ -3636,7 +3750,7 @@ instruct rorI_imm(iRegI dst, iRegIorL2I src, immI shift)
     __ shru_imm($dst$$Register, t0, (uint32_t)$shift$$constant & 31);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(ishift_reg);
 %}
 
 instruct rolI_imm(iRegI dst, iRegIorL2I src, immI shift)
@@ -3653,7 +3767,7 @@ instruct rolI_imm(iRegI dst, iRegIorL2I src, immI shift)
     __ shru_imm($dst$$Register, t0, (uint32_t)(-$shift$$constant) & 31);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(ishift_reg);
 %}
 
 // By a register: shl/shr by 64 give 0, so a count of 0 needs no special case.
@@ -3745,7 +3859,7 @@ instruct mulHiL_rReg(iRegL dst, iRegL src1, iRegL src2)
     __ getf_sig($dst$$Register, ftmp0);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_mul);
 %}
 
 instruct umulHiL_rReg(iRegL dst, iRegL src1, iRegL src2)
@@ -3762,7 +3876,7 @@ instruct umulHiL_rReg(iRegL dst, iRegL src1, iRegL src2)
     __ getf_sig($dst$$Register, ftmp0);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_mul);
 %}
 
 // Min and max (C2's loop optimizations create these): a compare and two
@@ -3780,7 +3894,7 @@ instruct minI_reg_reg(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
     __ mov($dst$$Register, $src2$$Register, ptmp1);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_minmax);
 %}
 
 instruct maxI_reg_reg(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
@@ -3796,7 +3910,7 @@ instruct maxI_reg_reg(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
     __ mov($dst$$Register, $src1$$Register, ptmp1);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_minmax);
 %}
 
 // ============================================================================
@@ -3901,7 +4015,7 @@ instruct divF_reg_reg(fRegF dst, fRegF src1, fRegF src2)
     __ fdiv_s($dst$$FloatRegister, $src1$$FloatRegister, $src2$$FloatRegister);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_div);
 %}
 
 instruct divD_reg_reg(fRegD dst, fRegD src1, fRegD src2)
@@ -3915,7 +4029,7 @@ instruct divD_reg_reg(fRegD dst, fRegD src1, fRegD src2)
     __ fdiv_d($dst$$FloatRegister, $src1$$FloatRegister, $src2$$FloatRegister);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_div);
 %}
 
 instruct negF_reg(fRegF dst, fRegF src)
@@ -3985,7 +4099,7 @@ instruct sqrtD_reg(fRegD dst, fRegD src)
     __ fsqrt_d($dst$$FloatRegister, $src$$FloatRegister);
   %}
 
-  ins_pipe(pipe_slow);
+  ins_pipe(pipe_div);
 %}
 
 // ============================================================================
@@ -4096,7 +4210,7 @@ instruct convI2L_reg_reg(iRegL dst, iRegIorL2I src)
     __ sxt4($dst$$Register, $src$$Register);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(ishift_reg);
 %}
 
 // Lazy ints: the int is the long's low 32 bits; the upper half may stay.
@@ -4126,7 +4240,7 @@ instruct convI2UL_reg_reg(iRegL dst, iRegIorL2I src, immL_32bits mask)
     __ zxt4($dst$$Register, $src$$Register);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(ishift_reg);
 %}
 
 instruct convP2I(iRegI dst, iRegP src)
@@ -4187,7 +4301,7 @@ instruct convI2F_reg_reg(fRegF dst, iRegIorL2I src)
     __ fnorm_s($dst$$FloatRegister, $dst$$FloatRegister);
   %}
 
-  ins_pipe(fp_default);
+  ins_pipe(fp_cvt);
 %}
 
 instruct convI2D_reg_reg(fRegD dst, iRegIorL2I src)
@@ -4204,7 +4318,7 @@ instruct convI2D_reg_reg(fRegD dst, iRegIorL2I src)
     __ fnorm_d($dst$$FloatRegister, $dst$$FloatRegister);
   %}
 
-  ins_pipe(fp_default);
+  ins_pipe(fp_cvt);
 %}
 
 instruct convL2F_reg_reg(fRegF dst, iRegL src)
@@ -4220,7 +4334,7 @@ instruct convL2F_reg_reg(fRegF dst, iRegL src)
     __ fnorm_s($dst$$FloatRegister, $dst$$FloatRegister);
   %}
 
-  ins_pipe(fp_default);
+  ins_pipe(fp_cvt);
 %}
 
 instruct convL2D_reg_reg(fRegD dst, iRegL src)
@@ -4236,7 +4350,7 @@ instruct convL2D_reg_reg(fRegD dst, iRegL src)
     __ fnorm_d($dst$$FloatRegister, $dst$$FloatRegister);
   %}
 
-  ins_pipe(fp_default);
+  ins_pipe(fp_cvt);
 %}
 
 // FP to integer, Java semantics (NaN -> 0, saturating): java_fp_to_int/long
@@ -4309,7 +4423,7 @@ instruct MoveF2I_reg_reg(iRegI dst, fRegF src)
     __ getf_s($dst$$Register, $src$$FloatRegister);
   %}
 
-  ins_pipe(fp_default);
+  ins_pipe(fp_xfer);
 %}
 
 instruct MoveI2F_reg_reg(fRegF dst, iRegIorL2I src)
@@ -4323,7 +4437,7 @@ instruct MoveI2F_reg_reg(fRegF dst, iRegIorL2I src)
     __ setf_s($dst$$FloatRegister, $src$$Register);
   %}
 
-  ins_pipe(fp_default);
+  ins_pipe(fp_xfer);
 %}
 
 instruct MoveD2L_reg_reg(iRegL dst, fRegD src)
@@ -4337,7 +4451,7 @@ instruct MoveD2L_reg_reg(iRegL dst, fRegD src)
     __ getf_d($dst$$Register, $src$$FloatRegister);
   %}
 
-  ins_pipe(fp_default);
+  ins_pipe(fp_xfer);
 %}
 
 instruct MoveL2D_reg_reg(fRegD dst, iRegL src)
@@ -4351,7 +4465,7 @@ instruct MoveL2D_reg_reg(fRegD dst, iRegL src)
     __ setf_d($dst$$FloatRegister, $src$$Register);
   %}
 
-  ins_pipe(fp_default);
+  ins_pipe(fp_xfer);
 %}
 
 // Compressed class pointers (compressed oops are off: FRAME-DESIGN.md 2.4).
@@ -4366,7 +4480,7 @@ instruct encodeKlass_not_null(iRegN dst, iRegP src)
     __ encode_klass_not_null($dst$$Register, $src$$Register);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct decodeKlass_not_null(iRegPNoSp dst, iRegN src)
@@ -4381,7 +4495,7 @@ instruct decodeKlass_not_null(iRegPNoSp dst, iRegN src)
     __ decode_klass_not_null($dst$$Register);
   %}
 
-  ins_pipe(ialu_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 // ============================================================================
@@ -4402,7 +4516,7 @@ instruct loadB(iRegI dst, memory mem)
     __ sxt1($dst$$Register, $dst$$Register);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(iload_ext);
 %}
 
 instruct loadB2L(iRegL dst, memory mem)
@@ -4418,7 +4532,7 @@ instruct loadB2L(iRegL dst, memory mem)
     __ sxt1($dst$$Register, $dst$$Register);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(iload_ext);
 %}
 
 instruct loadUB(iRegI dst, memory mem)
@@ -4466,7 +4580,7 @@ instruct loadS(iRegI dst, memory mem)
     __ sxt2($dst$$Register, $dst$$Register);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(iload_ext);
 %}
 
 instruct loadS2L(iRegL dst, memory mem)
@@ -4482,7 +4596,7 @@ instruct loadS2L(iRegL dst, memory mem)
     __ sxt2($dst$$Register, $dst$$Register);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(iload_ext);
 %}
 
 instruct loadUS(iRegI dst, memory mem)
@@ -4546,7 +4660,7 @@ instruct loadI2L(iRegL dst, memory mem)
     __ sxt4($dst$$Register, $dst$$Register);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(iload_ext);
 %}
 
 instruct loadUI2L(iRegL dst, memory mem, immL_32bits mask)
@@ -4686,7 +4800,7 @@ instruct loadB_acq(iRegI dst, indirect mem)
     __ sxt1($dst$$Register, $dst$$Register);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(iload_ext);
 %}
 
 instruct loadUB_acq(iRegI dst, indirect mem)
@@ -4718,7 +4832,7 @@ instruct loadS_acq(iRegI dst, indirect mem)
     __ sxt2($dst$$Register, $dst$$Register);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(iload_ext);
 %}
 
 instruct loadUS_acq(iRegI dst, indirect mem)
@@ -4751,7 +4865,7 @@ instruct loadF_acq(fRegF dst, memory mem)
     __ mf();
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(fload);
 %}
 
 // FP loads have no acquire form: the load, then mf.
@@ -4768,7 +4882,7 @@ instruct loadD_acq(fRegD dst, memory mem)
     __ mf();
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(fload);
 %}
 
 instruct loadKlass(iRegPNoSp dst, memory mem)
@@ -4831,7 +4945,7 @@ instruct storeN(iRegN src, memory mem)
     __ access(C2_MacroAssembler::op_st4, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct loadF(fRegF dst, memory mem)
@@ -4846,7 +4960,7 @@ instruct loadF(fRegF dst, memory mem)
     __ access(C2_MacroAssembler::op_ldfs, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(fload);
 %}
 
 instruct loadD(fRegD dst, memory mem)
@@ -4861,7 +4975,7 @@ instruct loadD(fRegD dst, memory mem)
     __ access(C2_MacroAssembler::op_ldfd, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(fload);
 %}
 
 instruct storeB(iRegIorL2I src, memory mem)
@@ -4876,7 +4990,7 @@ instruct storeB(iRegIorL2I src, memory mem)
     __ access(C2_MacroAssembler::op_st1, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeC(iRegIorL2I src, memory mem)
@@ -4891,7 +5005,7 @@ instruct storeC(iRegIorL2I src, memory mem)
     __ access(C2_MacroAssembler::op_st2, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeI(iRegIorL2I src, memory mem)
@@ -4906,7 +5020,7 @@ instruct storeI(iRegIorL2I src, memory mem)
     __ access(C2_MacroAssembler::op_st4, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeL(iRegL src, memory mem)
@@ -4921,7 +5035,7 @@ instruct storeL(iRegL src, memory mem)
     __ access(C2_MacroAssembler::op_st8, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeNKlass(iRegN src, memory mem)
@@ -4935,7 +5049,7 @@ instruct storeNKlass(iRegN src, memory mem)
     __ access(C2_MacroAssembler::op_st4, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeimmB0(immI0 zero, memory mem)
@@ -4950,7 +5064,7 @@ instruct storeimmB0(immI0 zero, memory mem)
     __ access(C2_MacroAssembler::op_st1, zr->encoding(), as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeimmC0(immI0 zero, memory mem)
@@ -4965,7 +5079,7 @@ instruct storeimmC0(immI0 zero, memory mem)
     __ access(C2_MacroAssembler::op_st2, zr->encoding(), as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeimmI0(immI0 zero, memory mem)
@@ -4980,7 +5094,7 @@ instruct storeimmI0(immI0 zero, memory mem)
     __ access(C2_MacroAssembler::op_st4, zr->encoding(), as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeimmL0(immL0 zero, memory mem)
@@ -4995,7 +5109,7 @@ instruct storeimmL0(immL0 zero, memory mem)
     __ access(C2_MacroAssembler::op_st8, zr->encoding(), as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeP(iRegP src, memory mem)
@@ -5010,7 +5124,7 @@ instruct storeP(iRegP src, memory mem)
     __ access(C2_MacroAssembler::op_st8, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeimmP0(immP0 zero, memory mem)
@@ -5025,7 +5139,7 @@ instruct storeimmP0(immP0 zero, memory mem)
     __ access(C2_MacroAssembler::op_st8, zr->encoding(), as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 // Releasing stores (volatile writes): st.rel, with the leading MemBarRelease
@@ -5042,7 +5156,7 @@ instruct storeB_rel(iRegIorL2I src, indirect mem)
     __ access(C2_MacroAssembler::op_st1_rel, $src$$reg, as_Register($mem$$base), 0);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeC_rel(iRegIorL2I src, indirect mem)
@@ -5057,7 +5171,7 @@ instruct storeC_rel(iRegIorL2I src, indirect mem)
     __ access(C2_MacroAssembler::op_st2_rel, $src$$reg, as_Register($mem$$base), 0);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeimmB0_rel(immI0 zero, indirect mem)
@@ -5072,7 +5186,7 @@ instruct storeimmB0_rel(immI0 zero, indirect mem)
     __ access(C2_MacroAssembler::op_st1_rel, zr->encoding(), as_Register($mem$$base), 0);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeimmC0_rel(immI0 zero, indirect mem)
@@ -5087,7 +5201,7 @@ instruct storeimmC0_rel(immI0 zero, indirect mem)
     __ access(C2_MacroAssembler::op_st2_rel, zr->encoding(), as_Register($mem$$base), 0);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeI_rel(iRegIorL2I src, indirect mem)
@@ -5102,7 +5216,7 @@ instruct storeI_rel(iRegIorL2I src, indirect mem)
     __ access(C2_MacroAssembler::op_st4_rel, $src$$reg, as_Register($mem$$base), 0);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeL_rel(iRegL src, indirect mem)
@@ -5117,7 +5231,7 @@ instruct storeL_rel(iRegL src, indirect mem)
     __ access(C2_MacroAssembler::op_st8_rel, $src$$reg, as_Register($mem$$base), 0);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeN_rel(iRegN src, indirect mem)
@@ -5132,7 +5246,7 @@ instruct storeN_rel(iRegN src, indirect mem)
     __ access(C2_MacroAssembler::op_st4_rel, $src$$reg, as_Register($mem$$base), 0);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeP_rel(iRegP src, indirect mem)
@@ -5147,7 +5261,7 @@ instruct storeP_rel(iRegP src, indirect mem)
     __ access(C2_MacroAssembler::op_st8_rel, $src$$reg, as_Register($mem$$base), 0);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeimmI0_rel(immI0 zero, indirect mem)
@@ -5162,7 +5276,7 @@ instruct storeimmI0_rel(immI0 zero, indirect mem)
     __ access(C2_MacroAssembler::op_st4_rel, zr->encoding(), as_Register($mem$$base), 0);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeimmL0_rel(immL0 zero, indirect mem)
@@ -5177,7 +5291,7 @@ instruct storeimmL0_rel(immL0 zero, indirect mem)
     __ access(C2_MacroAssembler::op_st8_rel, zr->encoding(), as_Register($mem$$base), 0);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeimmP0_rel(immP0 zero, indirect mem)
@@ -5192,7 +5306,7 @@ instruct storeimmP0_rel(immP0 zero, indirect mem)
     __ access(C2_MacroAssembler::op_st8_rel, zr->encoding(), as_Register($mem$$base), 0);
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeF(fRegF src, memory mem)
@@ -5206,7 +5320,7 @@ instruct storeF(fRegF src, memory mem)
     __ access(C2_MacroAssembler::op_stfs, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 instruct storeD(fRegD src, memory mem)
@@ -5220,7 +5334,7 @@ instruct storeD(fRegD src, memory mem)
     __ access(C2_MacroAssembler::op_stfd, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
-  ins_pipe(pipe_class_memory);
+  ins_pipe(istore);
 %}
 
 // ============================================================================
@@ -5259,7 +5373,7 @@ instruct cmpI_branch(cmpOp cmp, iRegIorL2I op1, iRegIorL2I op2, label lbl)
     __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_int, $op1$$Register, $op2$$Register, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpI_zero_branch(cmpOp cmp, iRegIorL2I op1, immI0 zero, label lbl)
@@ -5275,7 +5389,7 @@ instruct cmpI_zero_branch(cmpOp cmp, iRegIorL2I op1, immI0 zero, label lbl)
     __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_int, $op1$$Register, zr, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpI_loop(cmpOp cmp, iRegIorL2I op1, iRegIorL2I op2, label lbl)
@@ -5291,7 +5405,7 @@ instruct cmpI_loop(cmpOp cmp, iRegIorL2I op1, iRegIorL2I op2, label lbl)
     __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_int, $op1$$Register, $op2$$Register, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpI_zero_loop(cmpOp cmp, iRegIorL2I op1, immI0 zero, label lbl)
@@ -5307,7 +5421,7 @@ instruct cmpI_zero_loop(cmpOp cmp, iRegIorL2I op1, immI0 zero, label lbl)
     __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_int, $op1$$Register, zr, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpU_branch(cmpOpU cmp, iRegIorL2I op1, iRegIorL2I op2, label lbl)
@@ -5323,7 +5437,7 @@ instruct cmpU_branch(cmpOpU cmp, iRegIorL2I op1, iRegIorL2I op2, label lbl)
     __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_uint, $op1$$Register, $op2$$Register, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpU_zero_branch(cmpOpU cmp, iRegIorL2I op1, immI0 zero, label lbl)
@@ -5339,7 +5453,7 @@ instruct cmpU_zero_branch(cmpOpU cmp, iRegIorL2I op1, immI0 zero, label lbl)
     __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_uint, $op1$$Register, zr, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpL_branch(cmpOp cmp, iRegL op1, iRegL op2, label lbl)
@@ -5355,7 +5469,7 @@ instruct cmpL_branch(cmpOp cmp, iRegL op1, iRegL op2, label lbl)
     __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_long, $op1$$Register, $op2$$Register, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpL_zero_branch(cmpOp cmp, iRegL op1, immL0 zero, label lbl)
@@ -5371,7 +5485,7 @@ instruct cmpL_zero_branch(cmpOp cmp, iRegL op1, immL0 zero, label lbl)
     __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_long, $op1$$Register, zr, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpL_loop(cmpOp cmp, iRegL op1, iRegL op2, label lbl)
@@ -5387,7 +5501,7 @@ instruct cmpL_loop(cmpOp cmp, iRegL op1, iRegL op2, label lbl)
     __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_long, $op1$$Register, $op2$$Register, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpL_zero_loop(cmpOp cmp, iRegL op1, immL0 zero, label lbl)
@@ -5403,7 +5517,7 @@ instruct cmpL_zero_loop(cmpOp cmp, iRegL op1, immL0 zero, label lbl)
     __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_long, $op1$$Register, zr, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpUL_branch(cmpOpU cmp, iRegL op1, iRegL op2, label lbl)
@@ -5419,7 +5533,7 @@ instruct cmpUL_branch(cmpOpU cmp, iRegL op1, iRegL op2, label lbl)
     __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_ulong, $op1$$Register, $op2$$Register, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpUL_zero_branch(cmpOpU cmp, iRegL op1, immL0 zero, label lbl)
@@ -5435,7 +5549,7 @@ instruct cmpUL_zero_branch(cmpOpU cmp, iRegL op1, immL0 zero, label lbl)
     __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_ulong, $op1$$Register, zr, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpP_branch(cmpOpU cmp, iRegP op1, iRegP op2, label lbl)
@@ -5451,7 +5565,7 @@ instruct cmpP_branch(cmpOpU cmp, iRegP op1, iRegP op2, label lbl)
     __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_ulong, $op1$$Register, $op2$$Register, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpP_zero_branch(cmpOpU cmp, iRegP op1, immP0 zero, label lbl)
@@ -5467,7 +5581,7 @@ instruct cmpP_zero_branch(cmpOpU cmp, iRegP op1, immP0 zero, label lbl)
     __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_ulong, $op1$$Register, zr, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpN_branch(cmpOpU cmp, iRegN op1, iRegN op2, label lbl)
@@ -5483,7 +5597,7 @@ instruct cmpN_branch(cmpOpU cmp, iRegN op1, iRegN op2, label lbl)
     __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_uint, $op1$$Register, $op2$$Register, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpF_branch(cmpOp cmp, fRegF op1, fRegF op2, label lbl)
@@ -5499,7 +5613,7 @@ instruct cmpF_branch(cmpOp cmp, fRegF op1, fRegF op2, label lbl)
     __ float_cmp_branch($cmp$$cmpcode, $op1$$FloatRegister, $op2$$FloatRegister, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpF_loop(cmpOp cmp, fRegF op1, fRegF op2, label lbl)
@@ -5515,7 +5629,7 @@ instruct cmpF_loop(cmpOp cmp, fRegF op1, fRegF op2, label lbl)
     __ float_cmp_branch($cmp$$cmpcode, $op1$$FloatRegister, $op2$$FloatRegister, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpD_branch(cmpOp cmp, fRegD op1, fRegD op2, label lbl)
@@ -5531,7 +5645,7 @@ instruct cmpD_branch(cmpOp cmp, fRegD op1, fRegD op2, label lbl)
     __ float_cmp_branch($cmp$$cmpcode, $op1$$FloatRegister, $op2$$FloatRegister, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 instruct cmpD_loop(cmpOp cmp, fRegD op1, fRegD op2, label lbl)
@@ -5547,7 +5661,7 @@ instruct cmpD_loop(cmpOp cmp, fRegD op1, fRegD op2, label lbl)
     __ float_cmp_branch($cmp$$cmpcode, $op1$$FloatRegister, $op2$$FloatRegister, *($lbl$$label));
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 // Three-way compares: (a < b) ? -1 : (a > b) ? 1 : 0. For floats unordered
@@ -5626,7 +5740,7 @@ instruct cmovI_cmpI(iRegI dst, iRegIorL2I src, iRegIorL2I op1, iRegIorL2I op2, c
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovI_cmpU(iRegI dst, iRegIorL2I src, iRegIorL2I op1, iRegIorL2I op2, cmpOpU cop)
@@ -5641,7 +5755,7 @@ instruct cmovI_cmpU(iRegI dst, iRegIorL2I src, iRegIorL2I op1, iRegIorL2I op2, c
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovI_cmpL(iRegI dst, iRegIorL2I src, iRegL op1, iRegL op2, cmpOp cop)
@@ -5656,7 +5770,7 @@ instruct cmovI_cmpL(iRegI dst, iRegIorL2I src, iRegL op1, iRegL op2, cmpOp cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovI_cmpUL(iRegI dst, iRegIorL2I src, iRegL op1, iRegL op2, cmpOpU cop)
@@ -5671,7 +5785,7 @@ instruct cmovI_cmpUL(iRegI dst, iRegIorL2I src, iRegL op1, iRegL op2, cmpOpU cop
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovI_cmpP(iRegI dst, iRegIorL2I src, iRegP op1, iRegP op2, cmpOpU cop)
@@ -5686,7 +5800,7 @@ instruct cmovI_cmpP(iRegI dst, iRegIorL2I src, iRegP op1, iRegP op2, cmpOpU cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovI_cmpN(iRegI dst, iRegIorL2I src, iRegN op1, iRegN op2, cmpOpU cop)
@@ -5701,7 +5815,7 @@ instruct cmovI_cmpN(iRegI dst, iRegIorL2I src, iRegN op1, iRegN op2, cmpOpU cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovI_cmpF(iRegI dst, iRegIorL2I src, fRegF op1, fRegF op2, cmpOp cop)
@@ -5716,7 +5830,7 @@ instruct cmovI_cmpF(iRegI dst, iRegIorL2I src, fRegF op1, fRegF op2, cmpOp cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovI_cmpD(iRegI dst, iRegIorL2I src, fRegD op1, fRegD op2, cmpOp cop)
@@ -5731,7 +5845,7 @@ instruct cmovI_cmpD(iRegI dst, iRegIorL2I src, fRegD op1, fRegD op2, cmpOp cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovL_cmpI(iRegL dst, iRegL src, iRegIorL2I op1, iRegIorL2I op2, cmpOp cop)
@@ -5746,7 +5860,7 @@ instruct cmovL_cmpI(iRegL dst, iRegL src, iRegIorL2I op1, iRegIorL2I op2, cmpOp 
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovL_cmpU(iRegL dst, iRegL src, iRegIorL2I op1, iRegIorL2I op2, cmpOpU cop)
@@ -5761,7 +5875,7 @@ instruct cmovL_cmpU(iRegL dst, iRegL src, iRegIorL2I op1, iRegIorL2I op2, cmpOpU
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovL_cmpL(iRegL dst, iRegL src, iRegL op1, iRegL op2, cmpOp cop)
@@ -5776,7 +5890,7 @@ instruct cmovL_cmpL(iRegL dst, iRegL src, iRegL op1, iRegL op2, cmpOp cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovL_cmpUL(iRegL dst, iRegL src, iRegL op1, iRegL op2, cmpOpU cop)
@@ -5791,7 +5905,7 @@ instruct cmovL_cmpUL(iRegL dst, iRegL src, iRegL op1, iRegL op2, cmpOpU cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovL_cmpP(iRegL dst, iRegL src, iRegP op1, iRegP op2, cmpOpU cop)
@@ -5806,7 +5920,7 @@ instruct cmovL_cmpP(iRegL dst, iRegL src, iRegP op1, iRegP op2, cmpOpU cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovL_cmpN(iRegL dst, iRegL src, iRegN op1, iRegN op2, cmpOpU cop)
@@ -5821,7 +5935,7 @@ instruct cmovL_cmpN(iRegL dst, iRegL src, iRegN op1, iRegN op2, cmpOpU cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovL_cmpF(iRegL dst, iRegL src, fRegF op1, fRegF op2, cmpOp cop)
@@ -5836,7 +5950,7 @@ instruct cmovL_cmpF(iRegL dst, iRegL src, fRegF op1, fRegF op2, cmpOp cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovL_cmpD(iRegL dst, iRegL src, fRegD op1, fRegD op2, cmpOp cop)
@@ -5851,7 +5965,7 @@ instruct cmovL_cmpD(iRegL dst, iRegL src, fRegD op1, fRegD op2, cmpOp cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovP_cmpI(iRegPNoSp dst, iRegP src, iRegIorL2I op1, iRegIorL2I op2, cmpOp cop)
@@ -5866,7 +5980,7 @@ instruct cmovP_cmpI(iRegPNoSp dst, iRegP src, iRegIorL2I op1, iRegIorL2I op2, cm
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovP_cmpU(iRegPNoSp dst, iRegP src, iRegIorL2I op1, iRegIorL2I op2, cmpOpU cop)
@@ -5881,7 +5995,7 @@ instruct cmovP_cmpU(iRegPNoSp dst, iRegP src, iRegIorL2I op1, iRegIorL2I op2, cm
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovP_cmpL(iRegPNoSp dst, iRegP src, iRegL op1, iRegL op2, cmpOp cop)
@@ -5896,7 +6010,7 @@ instruct cmovP_cmpL(iRegPNoSp dst, iRegP src, iRegL op1, iRegL op2, cmpOp cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovP_cmpUL(iRegPNoSp dst, iRegP src, iRegL op1, iRegL op2, cmpOpU cop)
@@ -5911,7 +6025,7 @@ instruct cmovP_cmpUL(iRegPNoSp dst, iRegP src, iRegL op1, iRegL op2, cmpOpU cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovP_cmpP(iRegPNoSp dst, iRegP src, iRegP op1, iRegP op2, cmpOpU cop)
@@ -5926,7 +6040,7 @@ instruct cmovP_cmpP(iRegPNoSp dst, iRegP src, iRegP op1, iRegP op2, cmpOpU cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovP_cmpN(iRegPNoSp dst, iRegP src, iRegN op1, iRegN op2, cmpOpU cop)
@@ -5941,7 +6055,7 @@ instruct cmovP_cmpN(iRegPNoSp dst, iRegP src, iRegN op1, iRegN op2, cmpOpU cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovP_cmpF(iRegPNoSp dst, iRegP src, fRegF op1, fRegF op2, cmpOp cop)
@@ -5956,7 +6070,7 @@ instruct cmovP_cmpF(iRegPNoSp dst, iRegP src, fRegF op1, fRegF op2, cmpOp cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 instruct cmovP_cmpD(iRegPNoSp dst, iRegP src, fRegD op1, fRegD op2, cmpOp cop)
@@ -5971,7 +6085,7 @@ instruct cmovP_cmpD(iRegPNoSp dst, iRegP src, fRegD op1, fRegD op2, cmpOp cop)
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 
-  ins_pipe(ialu_reg_reg);
+  ins_pipe(ialu_reg_reg_2);
 %}
 
 // ============================================================================
@@ -6421,7 +6535,7 @@ instruct cmpFlag_branch(cmpOpEqNe cmp, rFlagsReg cr, label lbl)
     __ br_cond(*($lbl$$label), ($cmp$$cmpcode == BoolTest::eq) ? p10 : p11);
   %}
 
-  ins_pipe(pipe_branch);
+  ins_pipe(pipe_cmp_branch);
 %}
 
 // ============================================================================

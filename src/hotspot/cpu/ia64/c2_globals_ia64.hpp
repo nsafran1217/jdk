@@ -70,8 +70,10 @@ define_pd_global(intx, RegisterCostAreaRatio,        16000);
 // scheduler sick.
 define_pd_global(bool, OptoPeephole,                 false);
 define_pd_global(bool, UseCISCSpill,                 false);
-// No pipeline model yet; JDK 6 scheduled (C2-DESIGN.md section 11, C2-4).
-define_pd_global(bool, OptoScheduling,               false);
+// Latency scheduling with the Itanium 2 model in ia64.ad's pipeline block;
+// the emit-time packer forms the bundles (C2-DESIGN.md section 11). JDK 6
+// scheduled too.
+define_pd_global(bool, OptoScheduling,               true);
 define_pd_global(bool, OptoBundling,                 false);
 define_pd_global(bool, OptoRegScheduling,            false);
 // No vector unit is modelled (C2-DESIGN.md section 13).
