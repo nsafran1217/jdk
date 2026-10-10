@@ -74,7 +74,8 @@
   //
   // FastLock/FastUnlock (lightweight locking). The result is the RFLAGS pair:
   // p10 set (and p11 clear) on success, the reverse when the runtime must
-  // finish the job. Inflated monitors always take the slow path.
+  // finish the job. Inflated monitors are handled inline too, except with
+  // UseObjectMonitorTable.
   void fast_lock_lightweight(Register obj, Register box, Register tmp1, Register tmp2, Register tmp3);
   void fast_unlock_lightweight(Register obj, Register box, Register tmp1, Register tmp2, Register tmp3);
 
