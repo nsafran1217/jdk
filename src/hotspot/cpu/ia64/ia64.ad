@@ -7160,6 +7160,37 @@ instruct stringU_indexof_char(iRegP str1, iRegI cnt1, iRegI ch, iRegI result,
   ins_pipe(pipe_slow);
 %}
 
+instruct string_inflate(Universe dummy, iRegP src, iRegP dst, iRegI len,
+                        iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4)
+%{
+  match(Set dummy (StrInflatedCopy src (Binary dst len)));
+  effect(TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4);
+
+  ins_cost(10 * DEFAULT_COST);
+  format %{ "String Inflate $src, $dst, $len\t# @string_inflate" %}
+  ins_encode %{
+    __ byte_array_inflate($src$$Register, $dst$$Register, $len$$Register,
+                          $tmp1$$Register, $tmp2$$Register, $tmp3$$Register, $tmp4$$Register);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
+instruct string_compress(iRegP src, iRegP dst, iRegI len, iRegI result,
+                         iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4, iRegPNoSp tmp5)
+%{
+  match(Set result (StrCompressedCopy src (Binary dst len)));
+  effect(TEMP_DEF result, TEMP tmp1, TEMP tmp2, TEMP tmp3, TEMP tmp4, TEMP tmp5);
+
+  ins_cost(10 * DEFAULT_COST);
+  format %{ "String Compress $src, $dst, $len -> $result\t# @string_compress" %}
+  ins_encode %{
+    __ char_array_compress($src$$Register, $dst$$Register, $len$$Register, $result$$Register,
+                           $tmp1$$Register, $tmp2$$Register, $tmp3$$Register, $tmp4$$Register,
+                           $tmp5$$Register);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
 instruct count_positives(iRegP ary, iRegI len, iRegI result,
                          iRegPNoSp tmp1, iRegPNoSp tmp2, iRegPNoSp tmp3, iRegPNoSp tmp4)
 %{

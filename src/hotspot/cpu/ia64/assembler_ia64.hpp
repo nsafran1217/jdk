@@ -1155,6 +1155,8 @@ class Assembler : public AbstractAssembler {
   void fcmp_unord(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP) { emit_f(ia64::FcmpUnord(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().w(p1).w(p2).r(f2).r(f3).r(qp).fp_predicate()); }
 
   // r1 = r2 with its eight bytes reversed.
+  void unpack1_l(Register r1, Register r2, Register r3, QP) { emit_i(ia64::Unpack1L(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
+  void pack2_uss(Register r1, Register r2, Register r3, QP) { emit_i(ia64::Pack2Uss(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
   void mux1_brcst(Register r1, Register r2, QP) { emit_i(ia64::Mux1(r1->encoding(), r2->encoding(), ia64::kMux1Brcst, Q), D().w(r1).r(r2).r(qp)); }
   void mux2(Register r1, Register r2, uint32_t mht8, QP) { emit_i(ia64::Mux2(r1->encoding(), r2->encoding(), mht8, Q), D().w(r1).r(r2).r(qp)); }
   // Index of the lowest zero byte (0-7, else 8) / halfword (0-3, else 4).

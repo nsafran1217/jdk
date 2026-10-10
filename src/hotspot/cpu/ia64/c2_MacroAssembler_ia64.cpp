@@ -493,3 +493,99 @@ void C2_MacroAssembler::string_indexof_char(Register str_in, Register cnt_in, Re
   mov_immediate(result, -1);
   bind(done);
 }
+
+// Chars one at a time until dst is 8-byte aligned; then, if src is 4-byte
+// aligned too (the usual case: both offsets 0), four at a time with
+// ld4, unpack1.l (zero-interleave) and st8; then the rest one at a time.
+void C2_MacroAssembler::byte_array_inflate(Register src_in, Register dst_in, Register len_in,
+                                           Register tmp1, Register tmp2, Register tmp3,
+                                           Register tmp4) {
+  const Register src = tmp3, dst = tmp4, len = tmp2;
+  Label head, aligned, word_loop, tail, done;
+  mov(src, src_in);
+  mov(dst, dst_in);
+  sxt4(len, len_in);
+  bind(head);
+  beqz(len, done);
+  and_imm(t1, 7, dst);
+  beqz(t1, aligned);
+  ld1_inc(tmp1, src, 1);
+  st2_inc(dst, tmp1, 2);
+  adds(len, -1, len);
+  j(head);
+  bind(aligned);
+  and_imm(t1, 3, src);
+  bnez(t1, tail);
+  bind(word_loop);
+  mov_immediate(t1, 4);
+  cmp_lt(ptmp0, ptmp1, len, t1);
+  br_cond(tail, ptmp0);
+  ld4_inc(tmp1, src, 4);
+  unpack1_l(tmp1, zr, tmp1);
+  st8_inc(dst, tmp1, 8);
+  adds(len, -4, len);
+  j(word_loop);
+  bind(tail);
+  beqz(len, done);
+  ld1_inc(tmp1, src, 1);
+  st2_inc(dst, tmp1, 2);
+  adds(len, -1, len);
+  j(tail);
+  bind(done);
+}
+
+// Chars one at a time until dst is 8-byte aligned; then, if src is 8-byte
+// aligned too, eight at a time: two ld8, a test that every char is <= 0xff,
+// pack2.uss and st8. A word pair holding a wider char, and the rest, go one
+// char at a time, which stops at the exact index.
+void C2_MacroAssembler::char_array_compress(Register src_in, Register dst_in, Register len_in,
+                                            Register result, Register tmp1, Register tmp2,
+                                            Register tmp3, Register tmp4, Register tmp5) {
+  const Register src = tmp4, dst = tmp5, len = tmp3;   // len: chars left
+  Label head, aligned, word_loop, word_fail, tail, done;
+  mov(src, src_in);
+  mov(dst, dst_in);
+  sxt4(len, len_in);
+  mov(result, zr);                        // chars done
+  bind(head);
+  beqz(len, done);
+  and_imm(t1, 7, dst);
+  beqz(t1, aligned);
+  ld2_inc(tmp1, src, 2);
+  shru_imm(tmp2, tmp1, 8);
+  bnez(tmp2, done);
+  st1_inc(dst, tmp1, 1);
+  adds(result, 1, result);
+  adds(len, -1, len);
+  j(head);
+  bind(aligned);
+  and_imm(t1, 7, src);
+  bnez(t1, tail);
+  mov_immediate(tmp2, (int64_t)0xff00ff00ff00ff00ULL);
+  bind(word_loop);
+  mov_immediate(t1, 8);
+  cmp_lt(ptmp0, ptmp1, len, t1);
+  br_cond(tail, ptmp0);
+  ld8_inc(tmp1, src, 8);
+  ld8_inc(t0, src, 8);
+  or_(t1, tmp1, t0);
+  and_(t1, t1, tmp2);
+  bnez(t1, word_fail);
+  pack2_uss(tmp1, tmp1, t0);
+  st8_inc(dst, tmp1, 8);
+  adds(result, 8, result);
+  adds(len, -8, len);
+  j(word_loop);
+  bind(word_fail);
+  adds(src, -16, src);
+  bind(tail);
+  beqz(len, done);
+  ld2_inc(tmp1, src, 2);
+  shru_imm(tmp2, tmp1, 8);
+  bnez(tmp2, done);
+  st1_inc(dst, tmp1, 1);
+  adds(result, 1, result);
+  adds(len, -1, len);
+  j(tail);
+  bind(done);
+}

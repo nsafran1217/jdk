@@ -812,6 +812,19 @@ inline Insn Mux1(uint32_t r1, uint32_t r2, uint32_t mbtype4, uint32_t qp = 0) {
 static const uint32_t kMux1Rev = 0xb;   // byte reverse -- Long.reverseBytes
 static const uint32_t kMux1Brcst = 0x0; // every byte = the lowest byte
 
+// I2 multimedia forms (SDM vol. 3 Tables 4-17/4-18).
+inline Insn MmI2(uint32_t za, uint32_t zb, uint32_t x2a, uint32_t x2b, uint32_t x2c,
+                 uint32_t r1, uint32_t r2, uint32_t r3, uint32_t qp) {
+  return fOp(7) | fZa(za) | fZb(zb) | fVeI(0) | fX2a(x2a) | fX2bI(x2b) | fX2c(x2c) |
+         fR3(r3) | fR2(r2) | fR1(r1) | fQp(qp);
+}
+// unpack1.l r1 = r2, r3: bytes r3[0], r2[0], r3[1], r2[1], ... (low first);
+// with r2 = r0 it zero-extends the low four bytes of r3 to halfwords.
+inline Insn Unpack1L(uint32_t r1, uint32_t r2, uint32_t r3, uint32_t qp = 0) { return MmI2(0, 0, 2, 2, 1, r1, r2, r3, qp); }
+// pack2.uss r1 = r2, r3: the eight signed halfwords of r2 (low bytes of the
+// result) then r3, each saturated to an unsigned byte.
+inline Insn Pack2Uss(uint32_t r1, uint32_t r2, uint32_t r3, uint32_t qp = 0) { return MmI2(0, 1, 2, 0, 0, r1, r2, r3, qp); }
+
 // I4: mux2 r1 = r2, mhtype8. Each 2-bit field of mhtype8 picks the source
 // halfword for one destination halfword; 0 broadcasts halfword 0.
 inline Insn Mux2(uint32_t r1, uint32_t r2, uint32_t mht8, uint32_t qp = 0) {
