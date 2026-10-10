@@ -643,12 +643,14 @@ class HandlerImpl {
   }
 };
 
-// Calls into the code cache (stubs, blobs) are trampoline_calls, unless the
-// stub starts with a function descriptor (MacroAssembler::function_entry:
-// stubs C++ also calls, such as arraycopy). Those, and C functions, are
-// called through the descriptor.
+// Calls into the code cache (stubs, blobs) are trampoline_calls; C
+// functions are called through their descriptor. A stub that starts with a
+// function descriptor (MacroAssembler::function_entry: stubs C++ also calls,
+// such as arraycopy) is entered as code, just past the descriptor: generated
+// code never uses gp (FRAME-DESIGN.md 3.4), so the descriptor's gp is not
+// needed, and the indirect br.call b6 is avoided.
 inline bool call_through_descriptor(address entry) {
-  return !CodeCache::contains(entry) || MacroAssembler::is_function_entry(entry);
+  return !CodeCache::contains(entry);
 }
 
 // Whether a memory node may be emitted as packable instructions
@@ -1568,14 +1570,17 @@ encode %{
   %}
 
   // Calls to the runtime. A target in the code cache (a stub or blob) is
-  // called as code; a C function, or a stub that starts with a descriptor,
-  // through the descriptor (call_c reads it at emission time). The anchor needs the return address, which a C2 runtime
+  // called as code, past its descriptor if it has one; a C function through
+  // its descriptor (call_c reads it at emission time). The anchor needs the return address, which a C2 runtime
   // stub does not otherwise store: mov ip; adds; adds; st8 put it in
   // last_Java_pc before the call. MachCallRuntimeNode::ret_addr_offset has
   // both sizes.
   enc_class ia64_enc_java_to_runtime(method meth) %{
     address entry = (address)$meth$$method;
     if (!call_through_descriptor(entry)) {
+      if (MacroAssembler::is_function_entry(entry)) {
+        entry += 2 * wordSize;
+      }
       if (__ trampoline_call(entry, runtime_call_Relocation::spec()) == nullptr) {
         ciEnv::current()->record_failure("CodeCache is full");
         return;
