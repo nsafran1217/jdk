@@ -2232,7 +2232,10 @@ operand inline_cache_RegP(iRegP reg)
 // There is no displacement addressing (C2-DESIGN.md section 5): `indirect`
 // is [reg]; `indOffset14` is base + a 14-bit offset, emitted as one
 // { adds t0 = off, base ;; ld/st [t0] } bundle so that the memory node
-// itself starts at the faulting bundle (implicit null checks).
+// itself starts at the faulting bundle (implicit null checks). The acquiring
+// loads and releasing stores take both, as plain ones do. Only the atomics
+// take [reg] alone, so their address is a separate AddP node (which C2 may
+// hoist out of a loop as a derived pointer, live across its safepoints).
 
 operand indirect(iRegP reg)
 %{
@@ -4769,7 +4772,7 @@ instruct loadP(iRegPNoSp dst, memory mem)
 
 // Acquiring loads (volatile reads): ld.acq, with the trailing MemBarAcquire
 // folded away (unnecessary_acquire).
-instruct loadI_acq(iRegI dst, indirect mem)
+instruct loadI_acq(iRegI dst, memory mem)
 %{
   match(Set dst (LoadI mem));
   predicate(n->as_Load()->is_acquire());
@@ -4778,13 +4781,13 @@ instruct loadI_acq(iRegI dst, indirect mem)
   format %{ "ld4.acq  $dst, $mem\t# int, @loadI_acq" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld4_acq, $dst$$reg, as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_ld4_acq, $dst$$reg, as_Register($mem$$base), $mem$$disp);
   %}
 
   ins_pipe(pipe_class_memory);
 %}
 
-instruct loadL_acq(iRegL dst, indirect mem)
+instruct loadL_acq(iRegL dst, memory mem)
 %{
   match(Set dst (LoadL mem));
   predicate(n->as_Load()->is_acquire());
@@ -4793,13 +4796,13 @@ instruct loadL_acq(iRegL dst, indirect mem)
   format %{ "ld8.acq  $dst, $mem\t# long, @loadL_acq" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld8_acq, $dst$$reg, as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_ld8_acq, $dst$$reg, as_Register($mem$$base), $mem$$disp);
   %}
 
   ins_pipe(pipe_class_memory);
 %}
 
-instruct loadP_acq(iRegPNoSp dst, indirect mem)
+instruct loadP_acq(iRegPNoSp dst, memory mem)
 %{
   match(Set dst (LoadP mem));
   predicate(n->as_Load()->barrier_data() == 0 && n->as_Load()->is_acquire());
@@ -4808,13 +4811,13 @@ instruct loadP_acq(iRegPNoSp dst, indirect mem)
   format %{ "ld8.acq  $dst, $mem\t# ptr, @loadP_acq" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld8_acq, $dst$$reg, as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_ld8_acq, $dst$$reg, as_Register($mem$$base), $mem$$disp);
   %}
 
   ins_pipe(pipe_class_memory);
 %}
 
-instruct loadN_acq(iRegN dst, indirect mem)
+instruct loadN_acq(iRegN dst, memory mem)
 %{
   match(Set dst (LoadN mem));
   predicate(n->as_Load()->is_acquire());
@@ -4823,13 +4826,13 @@ instruct loadN_acq(iRegN dst, indirect mem)
   format %{ "ld4.acq  $dst, $mem\t# compressed ptr, @loadN_acq" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld4_acq, $dst$$reg, as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_ld4_acq, $dst$$reg, as_Register($mem$$base), $mem$$disp);
   %}
 
   ins_pipe(pipe_class_memory);
 %}
 
-instruct loadB_acq(iRegI dst, indirect mem)
+instruct loadB_acq(iRegI dst, memory mem)
 %{
   match(Set dst (LoadB mem));
   predicate(n->as_Load()->is_acquire());
@@ -4838,14 +4841,14 @@ instruct loadB_acq(iRegI dst, indirect mem)
   format %{ "ld1.acq + sxt1, byte  $dst, $mem\t# @loadB_acq" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld1_acq, $dst$$reg, as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_ld1_acq, $dst$$reg, as_Register($mem$$base), $mem$$disp);
     __ sxt1($dst$$Register, $dst$$Register);
   %}
 
   ins_pipe(iload_ext);
 %}
 
-instruct loadUB_acq(iRegI dst, indirect mem)
+instruct loadUB_acq(iRegI dst, memory mem)
 %{
   match(Set dst (LoadUB mem));
   predicate(n->as_Load()->is_acquire());
@@ -4854,14 +4857,14 @@ instruct loadUB_acq(iRegI dst, indirect mem)
   format %{ "ld1.acq, ubyte  $dst, $mem\t# @loadUB_acq" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld1_acq, $dst$$reg, as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_ld1_acq, $dst$$reg, as_Register($mem$$base), $mem$$disp);
     
   %}
 
   ins_pipe(pipe_class_memory);
 %}
 
-instruct loadS_acq(iRegI dst, indirect mem)
+instruct loadS_acq(iRegI dst, memory mem)
 %{
   match(Set dst (LoadS mem));
   predicate(n->as_Load()->is_acquire());
@@ -4870,14 +4873,14 @@ instruct loadS_acq(iRegI dst, indirect mem)
   format %{ "ld2.acq + sxt2, short  $dst, $mem\t# @loadS_acq" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld2_acq, $dst$$reg, as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_ld2_acq, $dst$$reg, as_Register($mem$$base), $mem$$disp);
     __ sxt2($dst$$Register, $dst$$Register);
   %}
 
   ins_pipe(iload_ext);
 %}
 
-instruct loadUS_acq(iRegI dst, indirect mem)
+instruct loadUS_acq(iRegI dst, memory mem)
 %{
   match(Set dst (LoadUS mem));
   predicate(n->as_Load()->is_acquire());
@@ -4886,7 +4889,7 @@ instruct loadUS_acq(iRegI dst, indirect mem)
   format %{ "ld2.acq, char  $dst, $mem\t# @loadUS_acq" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld2_acq, $dst$$reg, as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_ld2_acq, $dst$$reg, as_Register($mem$$base), $mem$$disp);
     
   %}
 
@@ -5186,7 +5189,7 @@ instruct storeimmP0(immP0 zero, memory mem)
 
 // Releasing stores (volatile writes): st.rel, with the leading MemBarRelease
 // folded away (unnecessary_release).
-instruct storeB_rel(iRegIorL2I src, indirect mem)
+instruct storeB_rel(iRegIorL2I src, memory mem)
 %{
   match(Set mem (StoreB mem src));
   predicate(needs_releasing_store(n));
@@ -5195,13 +5198,13 @@ instruct storeB_rel(iRegIorL2I src, indirect mem)
   format %{ "st1.rel  $src, $mem\t# @storeB_rel" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st1_rel, $src$$reg, as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_st1_rel, $src$$reg, as_Register($mem$$base), $mem$$disp);
   %}
 
   ins_pipe(istore);
 %}
 
-instruct storeC_rel(iRegIorL2I src, indirect mem)
+instruct storeC_rel(iRegIorL2I src, memory mem)
 %{
   match(Set mem (StoreC mem src));
   predicate(needs_releasing_store(n));
@@ -5210,13 +5213,13 @@ instruct storeC_rel(iRegIorL2I src, indirect mem)
   format %{ "st2.rel  $src, $mem\t# @storeC_rel" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st2_rel, $src$$reg, as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_st2_rel, $src$$reg, as_Register($mem$$base), $mem$$disp);
   %}
 
   ins_pipe(istore);
 %}
 
-instruct storeimmB0_rel(immI0 zero, indirect mem)
+instruct storeimmB0_rel(immI0 zero, memory mem)
 %{
   match(Set mem (StoreB mem zero));
   predicate(needs_releasing_store(n));
@@ -5225,13 +5228,13 @@ instruct storeimmB0_rel(immI0 zero, indirect mem)
   format %{ "st1.rel  r0, $mem\t# @storeimmB0_rel" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st1_rel, zr->encoding(), as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_st1_rel, zr->encoding(), as_Register($mem$$base), $mem$$disp);
   %}
 
   ins_pipe(istore);
 %}
 
-instruct storeimmC0_rel(immI0 zero, indirect mem)
+instruct storeimmC0_rel(immI0 zero, memory mem)
 %{
   match(Set mem (StoreC mem zero));
   predicate(needs_releasing_store(n));
@@ -5240,13 +5243,13 @@ instruct storeimmC0_rel(immI0 zero, indirect mem)
   format %{ "st2.rel  r0, $mem\t# @storeimmC0_rel" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st2_rel, zr->encoding(), as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_st2_rel, zr->encoding(), as_Register($mem$$base), $mem$$disp);
   %}
 
   ins_pipe(istore);
 %}
 
-instruct storeI_rel(iRegIorL2I src, indirect mem)
+instruct storeI_rel(iRegIorL2I src, memory mem)
 %{
   match(Set mem (StoreI mem src));
   predicate(needs_releasing_store(n));
@@ -5255,13 +5258,13 @@ instruct storeI_rel(iRegIorL2I src, indirect mem)
   format %{ "st4.rel  $src, $mem\t# @storeI_rel" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st4_rel, $src$$reg, as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_st4_rel, $src$$reg, as_Register($mem$$base), $mem$$disp);
   %}
 
   ins_pipe(istore);
 %}
 
-instruct storeL_rel(iRegL src, indirect mem)
+instruct storeL_rel(iRegL src, memory mem)
 %{
   match(Set mem (StoreL mem src));
   predicate(needs_releasing_store(n));
@@ -5270,13 +5273,13 @@ instruct storeL_rel(iRegL src, indirect mem)
   format %{ "st8.rel  $src, $mem\t# @storeL_rel" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st8_rel, $src$$reg, as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_st8_rel, $src$$reg, as_Register($mem$$base), $mem$$disp);
   %}
 
   ins_pipe(istore);
 %}
 
-instruct storeN_rel(iRegN src, indirect mem)
+instruct storeN_rel(iRegN src, memory mem)
 %{
   match(Set mem (StoreN mem src));
   predicate(needs_releasing_store(n));
@@ -5285,13 +5288,13 @@ instruct storeN_rel(iRegN src, indirect mem)
   format %{ "st4.rel  $src, $mem\t# @storeN_rel" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st4_rel, $src$$reg, as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_st4_rel, $src$$reg, as_Register($mem$$base), $mem$$disp);
   %}
 
   ins_pipe(istore);
 %}
 
-instruct storeP_rel(iRegP src, indirect mem)
+instruct storeP_rel(iRegP src, memory mem)
 %{
   match(Set mem (StoreP mem src));
   predicate(n->as_Store()->barrier_data() == 0 && needs_releasing_store(n));
@@ -5300,13 +5303,13 @@ instruct storeP_rel(iRegP src, indirect mem)
   format %{ "st8.rel  $src, $mem\t# @storeP_rel" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st8_rel, $src$$reg, as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_st8_rel, $src$$reg, as_Register($mem$$base), $mem$$disp);
   %}
 
   ins_pipe(istore);
 %}
 
-instruct storeimmI0_rel(immI0 zero, indirect mem)
+instruct storeimmI0_rel(immI0 zero, memory mem)
 %{
   match(Set mem (StoreI mem zero));
   predicate(needs_releasing_store(n));
@@ -5315,13 +5318,13 @@ instruct storeimmI0_rel(immI0 zero, indirect mem)
   format %{ "st4.rel  r0, $mem\t# @storeimmI0_rel" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st4_rel, zr->encoding(), as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_st4_rel, zr->encoding(), as_Register($mem$$base), $mem$$disp);
   %}
 
   ins_pipe(istore);
 %}
 
-instruct storeimmL0_rel(immL0 zero, indirect mem)
+instruct storeimmL0_rel(immL0 zero, memory mem)
 %{
   match(Set mem (StoreL mem zero));
   predicate(needs_releasing_store(n));
@@ -5330,13 +5333,13 @@ instruct storeimmL0_rel(immL0 zero, indirect mem)
   format %{ "st8.rel  r0, $mem\t# @storeimmL0_rel" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st8_rel, zr->encoding(), as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_st8_rel, zr->encoding(), as_Register($mem$$base), $mem$$disp);
   %}
 
   ins_pipe(istore);
 %}
 
-instruct storeimmP0_rel(immP0 zero, indirect mem)
+instruct storeimmP0_rel(immP0 zero, memory mem)
 %{
   match(Set mem (StoreP mem zero));
   predicate(n->as_Store()->barrier_data() == 0 && needs_releasing_store(n));
@@ -5345,7 +5348,7 @@ instruct storeimmP0_rel(immP0 zero, indirect mem)
   format %{ "st8.rel  r0, $mem\t# @storeimmP0_rel" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st8_rel, zr->encoding(), as_Register($mem$$base), 0);
+    __ access(C2_MacroAssembler::op_st8_rel, zr->encoding(), as_Register($mem$$base), $mem$$disp);
   %}
 
   ins_pipe(istore);
