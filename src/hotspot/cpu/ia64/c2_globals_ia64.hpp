@@ -44,10 +44,7 @@ define_pd_global(bool, PreferInterpreterNativeStubs, false);
 define_pd_global(bool, ProfileTraps,                 true);
 define_pd_global(bool, UseOnStackReplacement,        true);
 define_pd_global(bool, ProfileInterpreter,           true);
-// Not tiered yet: C1's tier-2/3 profiling (C2-SCOPE.md P4) is unwritten, so
-// the server VM runs C2 alone, as JDK 6's did. C1 alone remains
-// -XX:+TieredCompilation -XX:TieredStopAtLevel=1. Back to tiered with P4.
-define_pd_global(bool, TieredCompilation,            false);
+define_pd_global(bool, TieredCompilation,            COMPILER1_PRESENT(true) NOT_COMPILER1(false));
 define_pd_global(intx, CompileThreshold,             10000);
 
 define_pd_global(intx, OnStackReplacePercentage,     140);

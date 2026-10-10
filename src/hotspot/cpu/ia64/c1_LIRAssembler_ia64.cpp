@@ -1206,10 +1206,79 @@ void LIR_Assembler::emit_alloc_array(LIR_OpAllocArray* op) {
 
 // ---- type checks --------------------------------------------------------------
 
+// ---- profiling (tiered levels 2 and 3), after riscv ------------------------------
+//
+// MDO updates use t0/t1 only. Counters are bumped with a plain load, add and
+// store: profiles are racy on every port.
+
+void LIR_Assembler::increment_mdo(Register mdo, int offset) {
+  assert_different_registers(mdo, t0, t1);
+  __ add_imm(t1, mdo, offset, t0);
+  __ Assembler::ld8(t0, t1);
+  __ adds(t0, DataLayout::counter_increment, t0);
+  __ Assembler::st8(t1, t0);
+}
+
 void LIR_Assembler::type_profile_helper(Register mdo, ciMethodData *md, ciProfileData *data,
                                         Register recv, Label* update_done) {
-  // Only tiered compilation profiles in C1; the client VM does not.
-  Unimplemented();
+  for (uint i = 0; i < ReceiverTypeData::row_limit(); i++) {
+    Label next_test;
+    // See if the receiver is receiver[n].
+    __ ld8(t1, Address(mdo, md->byte_offset_of_slot(data, ReceiverTypeData::receiver_offset(i))));
+    __ bne(recv, t1, next_test);
+    increment_mdo(mdo, md->byte_offset_of_slot(data, ReceiverTypeData::receiver_count_offset(i)));
+    __ j(*update_done);
+    __ bind(next_test);
+  }
+
+  // Didn't find receiver; find next empty slot and fill it in
+  for (uint i = 0; i < ReceiverTypeData::row_limit(); i++) {
+    Label next_test;
+    Address recv_addr(mdo, md->byte_offset_of_slot(data, ReceiverTypeData::receiver_offset(i)));
+    __ ld8(t1, recv_addr);
+    __ bnez(t1, next_test);
+    __ st8(recv_addr, recv, t0);
+    __ mov_immediate(t1, DataLayout::counter_increment);
+    __ st8(Address(mdo, md->byte_offset_of_slot(data, ReceiverTypeData::receiver_count_offset(i))), t1, t0);
+    __ j(*update_done);
+    __ bind(next_test);
+  }
+}
+
+void LIR_Assembler::data_check(LIR_OpTypeCheck *op, ciMethodData **md, ciProfileData **data) {
+  ciMethod* method = op->profiled_method();
+  assert(method != nullptr, "Should have method");
+  int bci = op->profiled_bci();
+  *md = method->method_data_or_null();
+  guarantee(*md != nullptr, "Sanity");
+  *data = ((*md)->bci_to_data(bci));
+  assert(*data != nullptr, "need data for type check");
+  assert((*data)->is_ReceiverTypeData(), "need ReceiverTypeData for type check");
+}
+
+// Record null_seen for a null obj and branch to obj_is_null; otherwise record
+// obj's klass. Clobbers k_RInfo and klass_RInfo.
+void LIR_Assembler::profile_object(ciMethodData* md, ciProfileData* data, Register obj,
+                                   Register k_RInfo, Register klass_RInfo, Label* obj_is_null) {
+  Register mdo = klass_RInfo;
+  __ mov_metadata(mdo, md->constant_encoding());
+  Label not_null;
+  __ bnez(obj, not_null);
+  // Object is null, update MDO and exit
+  __ add_imm(t1, mdo, md->byte_offset_of_slot(data, DataLayout::flags_offset()), t0);
+  __ Assembler::ld1(t0, t1);
+  __ or_imm(t0, BitData::null_seen_byte_constant(), t0);
+  __ Assembler::st1(t1, t0);
+  __ j(*obj_is_null);
+  __ bind(not_null);
+
+  Label update_done;
+  Register recv = k_RInfo;
+  __ load_klass(recv, obj);
+  type_profile_helper(mdo, md, data, recv, &update_done);
+  increment_mdo(mdo, md->byte_offset_of_slot(data, CounterData::count_offset()));
+
+  __ bind(update_done);
 }
 
 // The out-of-line slow subtype check (Runtime1 slow_subtype_check: sub
@@ -1286,7 +1355,13 @@ void LIR_Assembler::emit_typecheck_helper(LIR_OpTypeCheck *op, Label* success, L
   ciKlass* k = op->klass();
   Register Rtmp1 = op->tmp3()->as_register();
 
-  assert(!op->should_profile(), "the client VM does not profile");
+  // check if it needs to be profiled
+  ciMethodData* md = nullptr;
+  ciProfileData* data = nullptr;
+  const bool should_profile = op->should_profile();
+  if (should_profile) {
+    data_check(op, &md, &data);
+  }
   Label* success_target = success;
   Label* failure_target = failure;
 
@@ -1299,7 +1374,11 @@ void LIR_Assembler::emit_typecheck_helper(LIR_OpTypeCheck *op, Label* success, L
 
   assert_different_registers(obj, k_RInfo, klass_RInfo);
 
-  __ beqz(obj, *obj_is_null);
+  if (should_profile) {
+    profile_object(md, data, obj, k_RInfo, klass_RInfo, obj_is_null);
+  } else {
+    __ beqz(obj, *obj_is_null);
+  }
 
   typecheck_loaded(op, k, k_RInfo);
   __ verify_oop(obj);
@@ -1352,14 +1431,25 @@ void LIR_Assembler::typecheck_lir_store(LIR_OpTypeCheck* op) {
   Register klass_RInfo = op->tmp2()->as_register();
   Register Rtmp1 = op->tmp3()->as_register();
 
-  assert(!op->should_profile(), "the client VM does not profile");
   CodeStub* stub = op->stub();
+
+  // check if it needs to be profiled
+  ciMethodData* md = nullptr;
+  ciProfileData* data = nullptr;
+  const bool should_profile = op->should_profile();
+  if (should_profile) {
+    data_check(op, &md, &data);
+  }
 
   Label  done;
   Label* success_target = &done;
   Label* failure_target = stub->entry();
 
-  __ beqz(value, done);
+  if (should_profile) {
+    profile_object(md, data, value, k_RInfo, klass_RInfo, &done);
+  } else {
+    __ beqz(value, done);
+  }
 
   // The array's klass load is the null check of the array.
   __ adds(t2, oopDesc::klass_offset_in_bytes(), array);
@@ -1732,8 +1822,67 @@ void LIR_Assembler::emit_load_klass(LIR_OpLoadKlass* op) {
 }
 
 void LIR_Assembler::emit_profile_call(LIR_OpProfileCall* op) {
-  // Only tiered compilation profiles in C1; the client VM does not.
-  Unimplemented();
+  ciMethod* method = op->profiled_method();
+  int bci          = op->profiled_bci();
+
+  // Update counter for all call types
+  ciMethodData* md = method->method_data_or_null();
+  guarantee(md != nullptr, "Sanity");
+  ciProfileData* data = md->bci_to_data(bci);
+  assert(data != nullptr && data->is_CounterData(), "need CounterData for calls");
+  assert(op->mdo()->is_single_cpu(),  "mdo must be allocated");
+  Register mdo  = op->mdo()->as_register();
+  __ mov_metadata(mdo, md->constant_encoding());
+  int counter_offset = md->byte_offset_of_slot(data, CounterData::count_offset());
+  // Perform additional virtual call profiling for invokevirtual and
+  // invokeinterface bytecodes
+  if (op->should_profile_receiver_type()) {
+    assert(op->recv()->is_single_cpu(), "recv must be allocated");
+    Register recv = op->recv()->as_register();
+    assert_different_registers(mdo, recv);
+    assert(data->is_VirtualCallData(), "need VirtualCallData for virtual calls");
+    ciKlass* known_klass = op->known_holder();
+    if (C1OptimizeVirtualCallProfiling && known_klass != nullptr) {
+      // We know the type that will be seen at this call site; we can
+      // statically update the MethodData* rather than needing to do
+      // dynamic tests on the receiver type
+      ciVirtualCallData* vc_data = (ciVirtualCallData*) data;
+      uint i;
+      for (i = 0; i < VirtualCallData::row_limit(); i++) {
+        ciKlass* receiver = vc_data->receiver(i);
+        if (known_klass->equals(receiver)) {
+          increment_mdo(mdo, md->byte_offset_of_slot(data, VirtualCallData::receiver_count_offset(i)));
+          return;
+        }
+      }
+
+      // Receiver type not found in profile data; select an empty slot
+      // Note that this is less efficient than it should be because it
+      // always does a write to the receiver part of the
+      // VirtualCallData rather than just the first time
+      for (i = 0; i < VirtualCallData::row_limit(); i++) {
+        ciKlass* receiver = vc_data->receiver(i);
+        if (receiver == nullptr) {
+          __ mov_metadata(t1, known_klass->constant_encoding());
+          __ st8(Address(mdo, md->byte_offset_of_slot(data, VirtualCallData::receiver_offset(i))), t1, t0);
+          increment_mdo(mdo, md->byte_offset_of_slot(data, VirtualCallData::receiver_count_offset(i)));
+          return;
+        }
+      }
+    } else {
+      __ load_klass(recv, recv);
+      Label update_done;
+      type_profile_helper(mdo, md, data, recv, &update_done);
+      // Receiver did not match any saved receiver and there is no empty row for it.
+      // Increment total counter to indicate polymorphic case.
+      increment_mdo(mdo, counter_offset);
+
+      __ bind(update_done);
+    }
+  } else {
+    // Static call
+    increment_mdo(mdo, counter_offset);
+  }
 }
 
 void LIR_Assembler::emit_delay(LIR_OpDelay*) { Unimplemented(); }
@@ -1747,9 +1896,12 @@ void LIR_Assembler::emit_updatecrc32(LIR_OpUpdateCRC32* op) {
   Unimplemented();
 }
 
+// Argument/return/parameter type profiling: only with TypeProfileLevel > 0,
+// which is 0 on IA-64 for now (globals_ia64.hpp; the interpreter does not
+// record type entries either).
 void LIR_Assembler::emit_profile_type(LIR_OpProfileType* op) {
-  // Only tiered compilation profiles in C1; the client VM does not.
-  Unimplemented();
+  guarantee(TypeProfileLevel == 0, "IA-64: C1 type profiling not implemented");
+  ShouldNotReachHere();
 }
 
 void LIR_Assembler::align_backward_branch_target() { }

@@ -69,6 +69,12 @@ private:
                            ciMethodData *md, ciProfileData *data,
                            Register recv, Label* update_done);
 
+  // Profiling (tiered levels 2 and 3).
+  void increment_mdo(Register mdo, int offset);
+  void data_check(LIR_OpTypeCheck* op, ciMethodData** md, ciProfileData** data);
+  void profile_object(ciMethodData* md, ciProfileData* data, Register obj,
+                      Register k_RInfo, Register klass_RInfo, Label* obj_is_null);
+
   void deoptimize_trap(CodeEmitInfo *info);
 
   // Sizes in bytes; every IA-64 instruction is a 16-byte bundle, a movl one
