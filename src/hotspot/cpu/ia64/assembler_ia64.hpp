@@ -955,10 +955,16 @@ class Assembler : public AbstractAssembler {
   // call into another blob, a stub) goes through a branch register instead.
   // target() records an unbound label's patch site at AbstractAssembler's
   // own position, which does not flush the scheduling window: flush first.
+  // The hint, unless given: .sptk for an unconditional branch; for a
+  // conditional one, the dynamic predictor with the classic static guess --
+  // .dptk backward (a loop), .dpnt forward (an exit, check or slow path).
   void br_cond(Label& L, QP) {
+    br_cond(L, qp, !(qp == pTrue) ? (L.is_bound() ? ia64::kDptk : ia64::kDpnt) : ia64::kSptk);
+  }
+  void br_cond(Label& L, PredicateRegister qp, ia64::BranchHint hint) {
     close_bundle();
     address dest = target(L);
-    emit_b(ia64::BrCondRel(bundle_disp(dest), Q), D().r(qp).branch());
+    emit_b(ia64::BrCondRel(bundle_disp(dest), Q, hint), D().r(qp).branch());
   }
   void br_call(BranchRegister b1, Label& L, QP) {
     _branch_reg_epoch++;

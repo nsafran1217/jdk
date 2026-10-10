@@ -617,8 +617,14 @@ inline Insn fTgt25c(int32_t bundleDisp) {
 }
 
 // B1: br.cond.sptk <ip-relative target>
-inline Insn BrCondRel(int32_t bundleDisp, uint32_t qp = 0) {
-  return fOp(4) | fBtype(0) | fPa(0) | fWha(0) | fD(0) | fTgt25c(bundleDisp) | fQp(qp);
+// The whether hint (SDM vol. 3 Table 4-52, bits 34:33): 0 .sptk, 1 .spnt,
+// 2 .dptk, 3 .dpnt. Itanium 2 does not consult its dynamic predictor for a
+// static hint, so .sptk on a branch that is usually not taken mispredicts it
+// every time.
+enum BranchHint : uint32_t { kSptk = 0, kSpnt = 1, kDptk = 2, kDpnt = 3 };
+
+inline Insn BrCondRel(int32_t bundleDisp, uint32_t qp = 0, uint32_t wh = kSptk) {
+  return fOp(4) | fBtype(0) | fPa(0) | fWha(wh) | fD(0) | fTgt25c(bundleDisp) | fQp(qp);
 }
 
 // B3: br.call.sptk.many b1 = <ip-relative target>
