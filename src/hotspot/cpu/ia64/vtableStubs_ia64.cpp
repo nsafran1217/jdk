@@ -83,6 +83,9 @@ VtableStub* VtableStubs::create_vtable_stub(int vtable_index) {
   ResourceMark    rm;
   CodeBuffer      cb(s->entry_point(), stub_code_length);
   MacroAssembler* masm = new MacroAssembler(&cb);
+  // Packed like compiled code. The recorded fault pcs (npe_addr, ame_addr)
+  // stay bundle starts: pc() closes the open bundle (BUNDLING.md, Stage 2).
+  Assembler::PackScope pack(masm);
 
   assert(VtableStub::receiver_location() == j_rarg0->as_VMReg(), "receiver expected in j_rarg0");
 
@@ -142,6 +145,9 @@ VtableStub* VtableStubs::create_itable_stub(int itable_index) {
   ResourceMark    rm;
   CodeBuffer      cb(s->entry_point(), stub_code_length);
   MacroAssembler* masm = new MacroAssembler(&cb);
+  // Packed like compiled code. The recorded fault pcs (npe_addr, ame_addr)
+  // stay bundle starts: pc() closes the open bundle (BUNDLING.md, Stage 2).
+  Assembler::PackScope pack(masm);
 
   // This stub is called from compiled code, which has no callee-saved
   // registers: everything but the arguments (r20-r27, f8-f15) is free.
