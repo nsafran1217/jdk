@@ -42,8 +42,6 @@ class VM_Version : public Abstract_VM_Version {
   constexpr static bool supports_recursive_lightweight_locking() { return true; }
 
   static void initialize_cpu_information(void);
-
-  static bool profile_all_receivers_at_type_check() { return false; }
 };
 
 #endif // CPU_IA64_VM_VERSION_IA64_HPP
