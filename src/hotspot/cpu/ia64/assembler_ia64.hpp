@@ -454,7 +454,22 @@ class Assembler : public AbstractAssembler {
 
   // Position observers: close the open bundle first (see above).
   address pc()  { close_bundle(); return AbstractAssembler::pc(); }
-  int offset()  { close_bundle(); return AbstractAssembler::offset(); }
+  int offset() {
+    if (_offset_keeps_bundle) {
+      // C2 emission (UseC2BundlePacking): the open bundle's 16 bytes are
+      // already in the buffer, so the raw offset is past it and names where
+      // the next bundle starts. Anything that must start a bundle at a
+      // recorded offset -- labels, branches, relocations, barriers, memory
+      // nodes, call shapes -- closes the open bundle and starts exactly
+      // there; packable instructions of the next node may still join it.
+      flush_window();
+      return AbstractAssembler::offset();
+    }
+    close_bundle();
+    return AbstractAssembler::offset();
+  }
+  // See offset(). Set for the whole of a C2 compilation's emission.
+  void set_offset_keeps_bundle(bool on) { close_bundle(); _offset_keeps_bundle = on; }
   // A label also ends the instruction group, keeping the stop before it.
   // Continuing the group across it would be legal (a taken branch to it
   // starts a new group anyway), but then the label's first instructions
@@ -479,6 +494,7 @@ class Assembler : public AbstractAssembler {
   int raw_offset() const { return AbstractAssembler::offset(); }
 
   int          _pack_depth = 0;
+  bool         _offset_keeps_bundle = false;
   bool         _ob_open    = false;      // the last bundle can take more
   CodeSection* _ob_sect    = nullptr;
   int          _ob_off     = -1;

@@ -143,6 +143,10 @@ define_pd_global(intx, InlineSmallCode, 2500);
                                                                                  \
   product(bool, UsePollWordRegister, true, DIAGNOSTIC,                           \
           "C1 code keeps &JavaThread::_poll_word in r7, so a loop's "          \
-          "safepoint poll is one load shorter")
+          "safepoint poll is one load shorter")                                \
+                                                                                 \
+  product(bool, UseC2BundlePacking, false, DIAGNOSTIC,                           \
+          "Pack C2 code up to three instructions per bundle, across node "     \
+          "boundaries (with UseBundlePacking)")
 
 #endif // CPU_IA64_GLOBALS_IA64_HPP

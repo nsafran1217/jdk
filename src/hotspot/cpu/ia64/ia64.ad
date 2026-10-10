@@ -813,6 +813,14 @@ void MachPrologNode::emit(C2_MacroAssembler* masm, PhaseRegAlloc* ra_) const {
   // replaces (NativeJump::patch_verified_entry).
   __ nop();
 
+  // From here on, pack (BUNDLING.md Stage 2) -- across nodes too: offset()
+  // leaves the open bundle open (Assembler::offset). The prolog is the first
+  // node emitted, in the real buffer and when measured alone.
+  if (UseC2BundlePacking) {
+    __ set_pack_default(true);
+    __ set_offset_keeps_bundle(true);
+  }
+
   // VM_Version::supports_fast_class_init_checks() is false.
   assert(!C->clinit_barrier_on_entry(), "no clinit barriers on IA-64");
 
@@ -1488,6 +1496,8 @@ encode %{
     if (!call_through_descriptor(entry)) {
       __ far_call(entry, runtime_call_Relocation::spec());
     } else {
+      // A fixed shape: mov ip must start the node's first bundle.
+      Assembler::NoPackScope no_pack(masm);
       int start = __ offset();
       __ mov_from_ip(t0);
       __ adds(t0, 8 * BytesPerBundle, t0);
