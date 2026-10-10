@@ -664,6 +664,16 @@ inline bool epilog_returns(const Compile* C) {
 // implicit null check's faulting access or the method has Unsafe accesses.
 bool packable_access(const MachNode* n);
 
+// Whether a store is emitted as st.rel: as aarch64, only a store with a
+// trailing membar (a volatile store, whose leading MemBarRelease it then
+// implements). C2 marks every reference store releasing
+// (StoreNode::release_if_reference), but an ordinary one needs no ordering
+// of its own: a new object is published by the MemBarStoreStore that ends
+// its initialization.
+inline bool needs_releasing_store(const Node* n) {
+  return n->as_Store()->trailing_membar() != nullptr;
+}
+
 // Barrier folding (C2-DESIGN.md section 9): which MemBarAcquire/Release
 // nodes an ld.acq/st.rel/cmpxchg.acq already implements.
 bool unnecessary_acquire(const Node* barrier);
@@ -710,7 +720,7 @@ static bool has_release_form(const Node* mem) {
   switch (mem->Opcode()) {
     case Op_StoreB: case Op_StoreC: case Op_StoreI: case Op_StoreL:
     case Op_StoreP: case Op_StoreN:
-      return mem->as_Store()->is_release();
+      return needs_releasing_store(mem);
     default:
       return false;
   }
@@ -4968,7 +4978,7 @@ instruct loadN(iRegN dst, memory mem)
 instruct storeN(iRegN src, memory mem)
 %{
   match(Set mem (StoreN mem src));
-  predicate(!n->as_Store()->is_release());
+  predicate(!needs_releasing_store(n));
 
   ins_cost(STORE_COST);
   format %{ "st4  $src, $mem\t# compressed ptr, @storeN" %}
@@ -5013,7 +5023,7 @@ instruct loadD(fRegD dst, memory mem)
 instruct storeB(iRegIorL2I src, memory mem)
 %{
   match(Set mem (StoreB mem src));
-  predicate(!n->as_Store()->is_release());
+  predicate(!needs_releasing_store(n));
 
   ins_cost(STORE_COST);
   format %{ "st1  $src, $mem\t# @storeB" %}
@@ -5028,7 +5038,7 @@ instruct storeB(iRegIorL2I src, memory mem)
 instruct storeC(iRegIorL2I src, memory mem)
 %{
   match(Set mem (StoreC mem src));
-  predicate(!n->as_Store()->is_release());
+  predicate(!needs_releasing_store(n));
 
   ins_cost(STORE_COST);
   format %{ "st2  $src, $mem\t# @storeC" %}
@@ -5043,7 +5053,7 @@ instruct storeC(iRegIorL2I src, memory mem)
 instruct storeI(iRegIorL2I src, memory mem)
 %{
   match(Set mem (StoreI mem src));
-  predicate(!n->as_Store()->is_release());
+  predicate(!needs_releasing_store(n));
 
   ins_cost(STORE_COST);
   format %{ "st4  $src, $mem\t# @storeI" %}
@@ -5058,7 +5068,7 @@ instruct storeI(iRegIorL2I src, memory mem)
 instruct storeL(iRegL src, memory mem)
 %{
   match(Set mem (StoreL mem src));
-  predicate(!n->as_Store()->is_release());
+  predicate(!needs_releasing_store(n));
 
   ins_cost(STORE_COST);
   format %{ "st8  $src, $mem\t# @storeL" %}
@@ -5087,7 +5097,7 @@ instruct storeNKlass(iRegN src, memory mem)
 instruct storeimmB0(immI0 zero, memory mem)
 %{
   match(Set mem (StoreB mem zero));
-  predicate(!n->as_Store()->is_release());
+  predicate(!needs_releasing_store(n));
 
   ins_cost(STORE_COST);
   format %{ "st1  r0, $mem\t# @storeimmB0" %}
@@ -5102,7 +5112,7 @@ instruct storeimmB0(immI0 zero, memory mem)
 instruct storeimmC0(immI0 zero, memory mem)
 %{
   match(Set mem (StoreC mem zero));
-  predicate(!n->as_Store()->is_release());
+  predicate(!needs_releasing_store(n));
 
   ins_cost(STORE_COST);
   format %{ "st2  r0, $mem\t# @storeimmC0" %}
@@ -5117,7 +5127,7 @@ instruct storeimmC0(immI0 zero, memory mem)
 instruct storeimmI0(immI0 zero, memory mem)
 %{
   match(Set mem (StoreI mem zero));
-  predicate(!n->as_Store()->is_release());
+  predicate(!needs_releasing_store(n));
 
   ins_cost(STORE_COST);
   format %{ "st4  r0, $mem\t# @storeimmI0" %}
@@ -5132,7 +5142,7 @@ instruct storeimmI0(immI0 zero, memory mem)
 instruct storeimmL0(immL0 zero, memory mem)
 %{
   match(Set mem (StoreL mem zero));
-  predicate(!n->as_Store()->is_release());
+  predicate(!needs_releasing_store(n));
 
   ins_cost(STORE_COST);
   format %{ "st8  r0, $mem\t# @storeimmL0" %}
@@ -5147,7 +5157,7 @@ instruct storeimmL0(immL0 zero, memory mem)
 instruct storeP(iRegP src, memory mem)
 %{
   match(Set mem (StoreP mem src));
-  predicate(n->as_Store()->barrier_data() == 0 && !n->as_Store()->is_release());
+  predicate(n->as_Store()->barrier_data() == 0 && !needs_releasing_store(n));
 
   ins_cost(STORE_COST);
   format %{ "st8  $src, $mem\t# ptr, @storeP" %}
@@ -5162,7 +5172,7 @@ instruct storeP(iRegP src, memory mem)
 instruct storeimmP0(immP0 zero, memory mem)
 %{
   match(Set mem (StoreP mem zero));
-  predicate(n->as_Store()->barrier_data() == 0 && !n->as_Store()->is_release());
+  predicate(n->as_Store()->barrier_data() == 0 && !needs_releasing_store(n));
 
   ins_cost(STORE_COST);
   format %{ "st8  r0, $mem\t# ptr, @storeimmP0" %}
@@ -5179,7 +5189,7 @@ instruct storeimmP0(immP0 zero, memory mem)
 instruct storeB_rel(iRegIorL2I src, indirect mem)
 %{
   match(Set mem (StoreB mem src));
-  predicate(n->as_Store()->is_release());
+  predicate(needs_releasing_store(n));
 
   ins_cost(VOLATILE_REF_COST);
   format %{ "st1.rel  $src, $mem\t# @storeB_rel" %}
@@ -5194,7 +5204,7 @@ instruct storeB_rel(iRegIorL2I src, indirect mem)
 instruct storeC_rel(iRegIorL2I src, indirect mem)
 %{
   match(Set mem (StoreC mem src));
-  predicate(n->as_Store()->is_release());
+  predicate(needs_releasing_store(n));
 
   ins_cost(VOLATILE_REF_COST);
   format %{ "st2.rel  $src, $mem\t# @storeC_rel" %}
@@ -5209,7 +5219,7 @@ instruct storeC_rel(iRegIorL2I src, indirect mem)
 instruct storeimmB0_rel(immI0 zero, indirect mem)
 %{
   match(Set mem (StoreB mem zero));
-  predicate(n->as_Store()->is_release());
+  predicate(needs_releasing_store(n));
 
   ins_cost(VOLATILE_REF_COST);
   format %{ "st1.rel  r0, $mem\t# @storeimmB0_rel" %}
@@ -5224,7 +5234,7 @@ instruct storeimmB0_rel(immI0 zero, indirect mem)
 instruct storeimmC0_rel(immI0 zero, indirect mem)
 %{
   match(Set mem (StoreC mem zero));
-  predicate(n->as_Store()->is_release());
+  predicate(needs_releasing_store(n));
 
   ins_cost(VOLATILE_REF_COST);
   format %{ "st2.rel  r0, $mem\t# @storeimmC0_rel" %}
@@ -5239,7 +5249,7 @@ instruct storeimmC0_rel(immI0 zero, indirect mem)
 instruct storeI_rel(iRegIorL2I src, indirect mem)
 %{
   match(Set mem (StoreI mem src));
-  predicate(n->as_Store()->is_release());
+  predicate(needs_releasing_store(n));
 
   ins_cost(VOLATILE_REF_COST);
   format %{ "st4.rel  $src, $mem\t# @storeI_rel" %}
@@ -5254,7 +5264,7 @@ instruct storeI_rel(iRegIorL2I src, indirect mem)
 instruct storeL_rel(iRegL src, indirect mem)
 %{
   match(Set mem (StoreL mem src));
-  predicate(n->as_Store()->is_release());
+  predicate(needs_releasing_store(n));
 
   ins_cost(VOLATILE_REF_COST);
   format %{ "st8.rel  $src, $mem\t# @storeL_rel" %}
@@ -5269,7 +5279,7 @@ instruct storeL_rel(iRegL src, indirect mem)
 instruct storeN_rel(iRegN src, indirect mem)
 %{
   match(Set mem (StoreN mem src));
-  predicate(n->as_Store()->is_release());
+  predicate(needs_releasing_store(n));
 
   ins_cost(VOLATILE_REF_COST);
   format %{ "st4.rel  $src, $mem\t# @storeN_rel" %}
@@ -5284,7 +5294,7 @@ instruct storeN_rel(iRegN src, indirect mem)
 instruct storeP_rel(iRegP src, indirect mem)
 %{
   match(Set mem (StoreP mem src));
-  predicate(n->as_Store()->barrier_data() == 0 && n->as_Store()->is_release());
+  predicate(n->as_Store()->barrier_data() == 0 && needs_releasing_store(n));
 
   ins_cost(VOLATILE_REF_COST);
   format %{ "st8.rel  $src, $mem\t# @storeP_rel" %}
@@ -5299,7 +5309,7 @@ instruct storeP_rel(iRegP src, indirect mem)
 instruct storeimmI0_rel(immI0 zero, indirect mem)
 %{
   match(Set mem (StoreI mem zero));
-  predicate(n->as_Store()->is_release());
+  predicate(needs_releasing_store(n));
 
   ins_cost(VOLATILE_REF_COST);
   format %{ "st4.rel  r0, $mem\t# @storeimmI0_rel" %}
@@ -5314,7 +5324,7 @@ instruct storeimmI0_rel(immI0 zero, indirect mem)
 instruct storeimmL0_rel(immL0 zero, indirect mem)
 %{
   match(Set mem (StoreL mem zero));
-  predicate(n->as_Store()->is_release());
+  predicate(needs_releasing_store(n));
 
   ins_cost(VOLATILE_REF_COST);
   format %{ "st8.rel  r0, $mem\t# @storeimmL0_rel" %}
@@ -5329,7 +5339,7 @@ instruct storeimmL0_rel(immL0 zero, indirect mem)
 instruct storeimmP0_rel(immP0 zero, indirect mem)
 %{
   match(Set mem (StoreP mem zero));
-  predicate(n->as_Store()->barrier_data() == 0 && n->as_Store()->is_release());
+  predicate(n->as_Store()->barrier_data() == 0 && needs_releasing_store(n));
 
   ins_cost(VOLATILE_REF_COST);
   format %{ "st8.rel  r0, $mem\t# @storeimmP0_rel" %}
