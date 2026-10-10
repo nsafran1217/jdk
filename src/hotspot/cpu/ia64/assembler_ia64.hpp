@@ -892,6 +892,9 @@ class Assembler : public AbstractAssembler {
   void zxt2(Register r1, Register r3, QP) { emit_i(ia64::Zxt2(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
   void zxt4(Register r1, Register r3, QP) { emit_i(ia64::Zxt4(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
 
+  // shrp r1 = r2, r3, count: the 128-bit r2:r3 shifted right by count, low
+  // 64 bits (a rotate when r2 == r3).
+  void shrp(Register r1, Register r2, Register r3, uint32_t count, QP) { emit_i(ia64::Shrp(r1->encoding(), r2->encoding(), r3->encoding(), count, Q), D().w(r1).r(r2).r(r3).r(qp)); }
   void popcnt(Register r1, Register r3, QP) { emit_i(ia64::Popcnt(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
 
   // r1 = address of the bundle holding this instruction.
@@ -1068,6 +1071,7 @@ class Assembler : public AbstractAssembler {
   void setf_d(FloatRegister f1, Register r2, QP)   { emit_m(ia64::SetfD(f1->encoding(), r2->encoding(), Q), D().w(f1).r(r2).r(qp)); }
   void getf_s(Register r1, FloatRegister f2, QP)   { emit_m(ia64::GetfS(r1->encoding(), f2->encoding(), Q), D().w(r1).r(f2).r(qp)); }
   void setf_s(FloatRegister f1, Register r2, QP)   { emit_m(ia64::SetfS(f1->encoding(), r2->encoding(), Q), D().w(f1).r(r2).r(qp)); }
+  void getf_exp(Register r1, FloatRegister f2, QP) { emit_m(ia64::GetfExp(r1->encoding(), f2->encoding(), Q), D().w(r1).r(f2).r(qp)); }
   void getf_sig(Register r1, FloatRegister f2, QP) { emit_m(ia64::GetfSig(r1->encoding(), f2->encoding(), Q), D().w(r1).r(f2).r(qp)); }
   void setf_sig(FloatRegister f1, Register r2, QP) { emit_m(ia64::SetfSig(f1->encoding(), r2->encoding(), Q), D().w(f1).r(r2).r(qp)); }
 
@@ -1075,6 +1079,18 @@ class Assembler : public AbstractAssembler {
   // have no multiplier.
   void xma_l(FloatRegister f1, FloatRegister f3, FloatRegister f4, FloatRegister f2, QP) {
     emit_f(ia64::XmaL(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), Q), D().w(f1).r(f3).r(f4).r(f2).r(qp));
+  }
+  // The high 64 bits of the 128-bit product, signed (xma.h) and unsigned (xma.hu).
+  void xma_h(FloatRegister f1, FloatRegister f3, FloatRegister f4, FloatRegister f2, QP) {
+    emit_f(ia64::XmaH(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), Q), D().w(f1).r(f3).r(f4).r(f2).r(qp));
+  }
+  void xma_hu(FloatRegister f1, FloatRegister f3, FloatRegister f4, FloatRegister f2, QP) {
+    emit_f(ia64::XmaHu(f1->encoding(), f3->encoding(), f4->encoding(), f2->encoding(), Q), D().w(f1).r(f3).r(f4).r(f2).r(qp));
+  }
+  // fnorm in register precision (no .s/.d) on status field sf: normalises a
+  // setf.sig integer without rounding it (count leading zeros).
+  void fnorm_reg(FloatRegister f1, FloatRegister f3, ia64::FpSf sf, QP) {
+    emit_f(ia64::Fnorm(f1->encoding(), f3->encoding(), sf, Q), D().w(f1).r(f3).r(qp));
   }
 
 #undef QP

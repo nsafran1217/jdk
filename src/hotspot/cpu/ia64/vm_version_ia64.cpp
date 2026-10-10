@@ -129,6 +129,11 @@ void VM_Version::initialize() {
     FLAG_SET_DEFAULT(C1LazyIntExtension, true);
   }
 
+  // popcnt is in the base ISA.
+  if (FLAG_IS_DEFAULT(UsePopCountInstruction)) {
+    FLAG_SET_DEFAULT(UsePopCountInstruction, true);
+  }
+
   // No vector unit is modelled (C2-DESIGN.md section 13).
   if (!FLAG_IS_DEFAULT(MaxVectorSize) && MaxVectorSize != 0) {
     warning("Vectors are not supported on IA-64");

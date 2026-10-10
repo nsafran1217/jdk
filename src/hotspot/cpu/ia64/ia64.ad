@@ -1314,6 +1314,9 @@ bool Matcher::match_rule_supported(int opcode) {
     case Op_FmaF:
     case Op_FmaD:
       return UseFMA;
+    case Op_PopCountI:
+    case Op_PopCountL:
+      return UsePopCountInstruction;
   }
 
   return true; // Per default match rules are supported.
@@ -3347,6 +3350,355 @@ instruct cmpLTMask_reg_zero(iRegI dst, iRegIorL2I p, immI0 zero)
   %}
 
   ins_pipe(ialu_reg);
+%}
+
+// ============================================================================
+// Bit operations (C2-DESIGN.md section 10)
+
+instruct popCountI(iRegI dst, iRegIorL2I src)
+%{
+  predicate(UsePopCountInstruction);
+  match(Set dst (PopCountI src));
+
+  ins_cost(2 * ALU_COST);
+  format %{ "zxt4 t1, $src ; popcnt  $dst, t1\t# @popCountI" %}
+
+  ins_encode %{
+    __ zxt4(t1, $src$$Register);
+    __ popcnt($dst$$Register, t1);
+  %}
+
+  ins_pipe(ialu_reg);
+%}
+
+instruct popCountL(iRegI dst, iRegL src)
+%{
+  predicate(UsePopCountInstruction);
+  match(Set dst (PopCountL src));
+
+  ins_cost(ALU_COST);
+  format %{ "popcnt  $dst, $src\t# @popCountL" %}
+
+  ins_encode %{
+    __ popcnt($dst$$Register, $src$$Register);
+  %}
+
+  ins_pipe(ialu_reg);
+%}
+
+// The exponent trick (Firefox's Clz): setf.sig makes the bits a register-
+// format integer; fnorm normalises it, and getf.exp's biased exponent is
+// 0xffff + the highest set bit's position. Zero is special-cased.
+instruct countLeadingZerosI(iRegI dst, iRegIorL2I src)
+%{
+  match(Set dst (CountLeadingZerosI src));
+
+  ins_cost(XFER_COST * 2);
+  format %{ "clz32  $dst, $src\t# @countLeadingZerosI" %}
+
+  ins_encode %{
+    __ zxt4(t1, $src$$Register);
+    __ setf_sig(ftmp0, t1);
+    __ cmp_eq(ptmp0, ptmp1, t1, zr);
+    __ fnorm_reg(ftmp0, ftmp0, ia64::sf1);
+    __ getf_exp(t0, ftmp0);
+    __ mov_immediate(t1, 0xffff + 31);
+    __ sub($dst$$Register, t1, t0);
+    __ adds($dst$$Register, 32, zr, ptmp0);
+  %}
+
+  ins_pipe(pipe_slow);
+%}
+
+instruct countLeadingZerosL(iRegI dst, iRegL src)
+%{
+  match(Set dst (CountLeadingZerosL src));
+
+  ins_cost(XFER_COST * 2);
+  format %{ "clz64  $dst, $src\t# @countLeadingZerosL" %}
+
+  ins_encode %{
+    __ setf_sig(ftmp0, $src$$Register);
+    __ cmp_eq(ptmp0, ptmp1, $src$$Register, zr);
+    __ fnorm_reg(ftmp0, ftmp0, ia64::sf1);
+    __ getf_exp(t0, ftmp0);
+    __ mov_immediate(t1, 0xffff + 63);
+    __ sub($dst$$Register, t1, t0);
+    __ adds($dst$$Register, 64, zr, ptmp0);
+  %}
+
+  ins_pipe(pipe_slow);
+%}
+
+// ctz(x) = popcnt((x & -x) - 1); for a long, x == 0 gives popcnt(-1) = 64.
+instruct countTrailingZerosI(iRegI dst, iRegIorL2I src)
+%{
+  match(Set dst (CountTrailingZerosI src));
+
+  ins_cost(5 * ALU_COST);
+  format %{ "ctz32  $dst, $src\t# @countTrailingZerosI" %}
+
+  ins_encode %{
+    __ zxt4(t1, $src$$Register);
+    __ cmp_eq(ptmp0, ptmp1, t1, zr);
+    __ Assembler::sub(t0, zr, t1);
+    __ and_(t0, t1, t0);
+    __ adds(t0, -1, t0);
+    __ popcnt($dst$$Register, t0);
+    __ adds($dst$$Register, 32, zr, ptmp0);
+  %}
+
+  ins_pipe(pipe_slow);
+%}
+
+instruct countTrailingZerosL(iRegI dst, iRegL src)
+%{
+  match(Set dst (CountTrailingZerosL src));
+
+  ins_cost(4 * ALU_COST);
+  format %{ "ctz64  $dst, $src\t# @countTrailingZerosL" %}
+
+  ins_encode %{
+    __ Assembler::sub(t0, zr, $src$$Register);
+    __ and_(t0, $src$$Register, t0);
+    __ adds(t0, -1, t0);
+    __ popcnt($dst$$Register, t0);
+  %}
+
+  ins_pipe(pipe_slow);
+%}
+
+instruct reverseBytesL(iRegL dst, iRegL src)
+%{
+  match(Set dst (ReverseBytesL src));
+
+  ins_cost(ALU_COST);
+  format %{ "mux1  $dst, $src, @rev\t# @reverseBytesL" %}
+
+  ins_encode %{
+    __ mux1_rev($dst$$Register, $src$$Register);
+  %}
+
+  ins_pipe(ialu_reg);
+%}
+
+instruct reverseBytesI(iRegI dst, iRegIorL2I src)
+%{
+  match(Set dst (ReverseBytesI src));
+
+  ins_cost(2 * ALU_COST);
+  format %{ "mux1 t1, $src, @rev ; shr  $dst, t1, 32\t# @reverseBytesI" %}
+
+  ins_encode %{
+    __ mux1_rev(t1, $src$$Register);
+    __ shr_imm($dst$$Register, t1, 32);
+  %}
+
+  ins_pipe(ialu_reg);
+%}
+
+instruct reverseBytesUS(iRegI dst, iRegIorL2I src)
+%{
+  match(Set dst (ReverseBytesUS src));
+
+  ins_cost(2 * ALU_COST);
+  format %{ "mux1 t1, $src, @rev ; shr.u  $dst, t1, 48\t# @reverseBytesUS" %}
+
+  ins_encode %{
+    __ mux1_rev(t1, $src$$Register);
+    __ shru_imm($dst$$Register, t1, 48);
+  %}
+
+  ins_pipe(ialu_reg);
+%}
+
+instruct reverseBytesS(iRegI dst, iRegIorL2I src)
+%{
+  match(Set dst (ReverseBytesS src));
+
+  ins_cost(2 * ALU_COST);
+  format %{ "mux1 t1, $src, @rev ; shr  $dst, t1, 48\t# @reverseBytesS" %}
+
+  ins_encode %{
+    __ mux1_rev(t1, $src$$Register);
+    __ shr_imm($dst$$Register, t1, 48);
+  %}
+
+  ins_pipe(ialu_reg);
+%}
+
+// Rotates. A long rotates with shrp (r2 == r3); an int rotates the doubled
+// word x:x (zxt4, shl 32, or), whose low 32 bits after a right shift by
+// 0-31 are the rotated int.
+instruct rorL_imm(iRegL dst, iRegL src, immI shift)
+%{
+  match(Set dst (RotateRight src shift));
+
+  ins_cost(ALU_COST);
+  format %{ "shrp  $dst, $src, $src, ($shift & 63)\t# @rorL_imm" %}
+
+  ins_encode %{
+    __ shrp($dst$$Register, $src$$Register, $src$$Register, (uint32_t)$shift$$constant & 63);
+  %}
+
+  ins_pipe(ialu_reg);
+%}
+
+instruct rolL_imm(iRegL dst, iRegL src, immI shift)
+%{
+  match(Set dst (RotateLeft src shift));
+
+  ins_cost(ALU_COST);
+  format %{ "shrp  $dst, $src, $src, (-$shift & 63)\t# @rolL_imm" %}
+
+  ins_encode %{
+    __ shrp($dst$$Register, $src$$Register, $src$$Register, (uint32_t)(-$shift$$constant) & 63);
+  %}
+
+  ins_pipe(ialu_reg);
+%}
+
+instruct rorI_imm(iRegI dst, iRegIorL2I src, immI shift)
+%{
+  match(Set dst (RotateRight src shift));
+
+  ins_cost(4 * ALU_COST);
+  format %{ "ror32  $dst, $src, ($shift & 31)\t# @rorI_imm" %}
+
+  ins_encode %{
+    __ zxt4(t1, $src$$Register);
+    __ shl_imm(t0, $src$$Register, 32);
+    __ or_(t0, t0, t1);
+    __ shru_imm($dst$$Register, t0, (uint32_t)$shift$$constant & 31);
+  %}
+
+  ins_pipe(ialu_reg);
+%}
+
+instruct rolI_imm(iRegI dst, iRegIorL2I src, immI shift)
+%{
+  match(Set dst (RotateLeft src shift));
+
+  ins_cost(4 * ALU_COST);
+  format %{ "rol32  $dst, $src, ($shift & 31)\t# @rolI_imm" %}
+
+  ins_encode %{
+    __ zxt4(t1, $src$$Register);
+    __ shl_imm(t0, $src$$Register, 32);
+    __ or_(t0, t0, t1);
+    __ shru_imm($dst$$Register, t0, (uint32_t)(-$shift$$constant) & 31);
+  %}
+
+  ins_pipe(ialu_reg);
+%}
+
+// By a register: shl/shr by 64 give 0, so a count of 0 needs no special case.
+instruct rorL_reg(iRegL dst, iRegL src, iRegIorL2I shift)
+%{
+  match(Set dst (RotateRight src shift));
+
+  ins_cost(5 * ALU_COST);
+  format %{ "ror64  $dst, $src, $shift\t# @rorL_reg" %}
+
+  ins_encode %{
+    __ Assembler::and_imm(t0, 63, $shift$$Register);
+    __ Assembler::sub_imm(t1, 64, t0);
+    __ shru(t2, $src$$Register, t0);
+    __ shl(t3, $src$$Register, t1);
+    __ or_($dst$$Register, t2, t3);
+  %}
+
+  ins_pipe(pipe_slow);
+%}
+
+instruct rolL_reg(iRegL dst, iRegL src, iRegIorL2I shift)
+%{
+  match(Set dst (RotateLeft src shift));
+
+  ins_cost(5 * ALU_COST);
+  format %{ "rol64  $dst, $src, $shift\t# @rolL_reg" %}
+
+  ins_encode %{
+    __ Assembler::and_imm(t0, 63, $shift$$Register);
+    __ Assembler::sub_imm(t1, 64, t0);
+    __ shl(t2, $src$$Register, t0);
+    __ shru(t3, $src$$Register, t1);
+    __ or_($dst$$Register, t2, t3);
+  %}
+
+  ins_pipe(pipe_slow);
+%}
+
+instruct rorI_reg(iRegI dst, iRegIorL2I src, iRegIorL2I shift)
+%{
+  match(Set dst (RotateRight src shift));
+
+  ins_cost(5 * ALU_COST);
+  format %{ "ror32  $dst, $src, $shift\t# @rorI_reg" %}
+
+  ins_encode %{
+    __ zxt4(t1, $src$$Register);
+    __ shl_imm(t2, $src$$Register, 32);
+    __ or_(t2, t2, t1);
+    __ Assembler::and_imm(t0, 31, $shift$$Register);
+    __ shru($dst$$Register, t2, t0);
+  %}
+
+  ins_pipe(pipe_slow);
+%}
+
+instruct rolI_reg(iRegI dst, iRegIorL2I src, iRegIorL2I shift)
+%{
+  match(Set dst (RotateLeft src shift));
+
+  ins_cost(6 * ALU_COST);
+  format %{ "rol32  $dst, $src, $shift\t# @rolI_reg" %}
+
+  ins_encode %{
+    __ zxt4(t1, $src$$Register);
+    __ shl_imm(t2, $src$$Register, 32);
+    __ or_(t2, t2, t1);
+    __ Assembler::sub(t0, zr, $shift$$Register);
+    __ Assembler::and_imm(t0, 31, t0);
+    __ shru($dst$$Register, t2, t0);
+  %}
+
+  ins_pipe(pipe_slow);
+%}
+
+// The high half of the 128-bit product, through the FP unit (xma.h, xma.hu).
+instruct mulHiL_rReg(iRegL dst, iRegL src1, iRegL src2)
+%{
+  match(Set dst (MulHiL src1 src2));
+
+  ins_cost(IMUL_COST);
+  format %{ "mulhi  $dst, $src1, $src2\t# @mulHiL_rReg" %}
+
+  ins_encode %{
+    __ setf_sig(ftmp0, $src1$$Register);
+    __ setf_sig(ftmp1, $src2$$Register);
+    __ xma_h(ftmp0, ftmp0, ftmp1, f0);
+    __ getf_sig($dst$$Register, ftmp0);
+  %}
+
+  ins_pipe(pipe_slow);
+%}
+
+instruct umulHiL_rReg(iRegL dst, iRegL src1, iRegL src2)
+%{
+  match(Set dst (UMulHiL src1 src2));
+
+  ins_cost(IMUL_COST);
+  format %{ "umulhi  $dst, $src1, $src2\t# @umulHiL_rReg" %}
+
+  ins_encode %{
+    __ setf_sig(ftmp0, $src1$$Register);
+    __ setf_sig(ftmp1, $src2$$Register);
+    __ xma_hu(ftmp0, ftmp0, ftmp1, f0);
+    __ getf_sig($dst$$Register, ftmp0);
+  %}
+
+  ins_pipe(pipe_slow);
 %}
 
 // Min and max (C2's loop optimizations create these): a compare and two
