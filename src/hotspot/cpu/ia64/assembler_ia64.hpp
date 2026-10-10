@@ -873,6 +873,8 @@ class Assembler : public AbstractAssembler {
   void ld8_fill(Register r1, Register r3, QP)  { emit_m(ia64::Ld8Fill(r1->encoding(), r3->encoding(), Q)); }
   void st8_spill(Register r3, Register r2, QP) { emit_m(ia64::St8Spill(r3->encoding(), r2->encoding(), Q)); }
 
+  // Line prefetch, never faults; |excl| when the line will be written.
+  void lfetch(Register r3, bool excl = false, uint32_t hint = 0, QP) { emit_m(ia64::Lfetch(r3->encoding(), excl, hint, Q), D().r(r3).r(qp)); }
   void ldfs(FloatRegister f1, Register r3, QP) { emit_m(ia64::Ldfs(f1->encoding(), r3->encoding(), Q), D().w(f1).r(r3).r(qp)); }
   void ldfd(FloatRegister f1, Register r3, QP) { emit_m(ia64::Ldfd(f1->encoding(), r3->encoding(), Q), D().w(f1).r(r3).r(qp)); }
   void stfs(Register r3, FloatRegister f2, QP) { emit_m(ia64::Stfs(r3->encoding(), f2->encoding(), Q), D().r(r3).r(f2).r(qp)); }

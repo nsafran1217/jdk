@@ -6742,6 +6742,28 @@ instruct get_and_addL(indirect mem, iRegL newval, iRegL incr)
 // ============================================================================
 // Subtype check slow path: result is zero on a hit, non-zero on a miss.
 
+// ---- allocation prefetch ----------------------------------------------------
+// lfetch.excl never faults, so it may run past the end of the TLAB.
+
+instruct prefetchAlloc(memory mem)
+%{
+  match(PrefetchAllocation mem);
+
+  ins_cost(DEFAULT_COST);
+  format %{ "lfetch.excl $mem\t# Prefetch allocation, @prefetchAlloc" %}
+  ins_encode %{
+    Register base = as_Register($mem$$base);
+    int disp = $mem$$disp;
+    if (disp == 0) {
+      __ lfetch(base, true);
+    } else {
+      __ adds(t0, disp, base);
+      __ lfetch(t0, true);
+    }
+  %}
+  ins_pipe(istore);
+%}
+
 // ---- String and array intrinsics -------------------------------------------
 // Word loops in C2_MacroAssembler; t1 and p6/p7 are their scratch.
 

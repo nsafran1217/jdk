@@ -153,11 +153,17 @@ void VM_Version::initialize() {
   // and f0 (0.0) as identity operands -- so the hardware support is total. It
   // simply has no effect until there is a compiler to emit the intrinsic.
 
-  // Prefetching (lfetch) exists but no stub uses it yet; see
-  // prefetch_linux_ia64.inline.hpp.
-  FLAG_SET_DEFAULT(AllocatePrefetchDistance, 0);
-  // ... nor does C2 (no PrefetchAllocation rule in ia64.ad yet).
-  FLAG_SET_DEFAULT(AllocatePrefetchStyle, 0);
+  // C2's PrefetchAllocation is lfetch.excl (ia64.ad, prefetchAlloc): one
+  // L2 line (128 bytes) per step, starting two lines past the new top.
+  if (FLAG_IS_DEFAULT(AllocatePrefetchStyle)) {
+    FLAG_SET_DEFAULT(AllocatePrefetchStyle, 1);
+  }
+  if (FLAG_IS_DEFAULT(AllocatePrefetchDistance)) {
+    FLAG_SET_DEFAULT(AllocatePrefetchDistance, 256);
+  }
+  if (FLAG_IS_DEFAULT(AllocatePrefetchStepSize)) {
+    FLAG_SET_DEFAULT(AllocatePrefetchStepSize, 128);
+  }
 }
 
 void VM_Version::initialize_cpu_information(void) {

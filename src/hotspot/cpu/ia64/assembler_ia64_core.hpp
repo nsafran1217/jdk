@@ -386,6 +386,12 @@ inline Insn LoadF6(uint32_t x6a, uint32_t f1, uint32_t r3, uint32_t qp = 0) {
 inline Insn StoreF9(uint32_t x6a, uint32_t r3, uint32_t f2, uint32_t qp = 0) {
   return fOp(6) | fM(0) | fXm(0) | fX6a(x6a) | fHint(0) | fR3(r3) | fSlot2(f2) | fQp(qp);
 }
+// M13: lfetch[.excl].lfhint [r3], the non-faulting line prefetch. lfhint:
+// 0 (none: temporal, level 1), 1 .nt1, 2 .nt2, 3 .nta. Not an orderable
+// operation (SDM vol. 3, lfetch).
+inline Insn Lfetch(uint32_t r3, bool excl, uint32_t hint = 0, uint32_t qp = 0) {
+  return fOp(6) | fM(0) | fXm(0) | fX6a(excl ? 0x2d : 0x2c) | fHint(hint) | fR3(r3) | fQp(qp);
+}
 inline Insn Ldfs(uint32_t f1, uint32_t r3, uint32_t qp = 0) { return LoadF6(0x02, f1, r3, qp); }
 inline Insn Ldfd(uint32_t f1, uint32_t r3, uint32_t qp = 0) { return LoadF6(0x03, f1, r3, qp); }
 inline Insn Stfs(uint32_t r3, uint32_t f2, uint32_t qp = 0) { return StoreF9(0x32, r3, f2, qp); }
