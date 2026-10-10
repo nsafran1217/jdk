@@ -26,6 +26,7 @@
 #include "interpreter/interpreter.hpp"
 #include "code/compiledIC.hpp"
 #include "code/vtableStubs.hpp"
+#include "oops/klass.inline.hpp"
 #include "oops/klassVtable.hpp"
 #include "vmreg_ia64.inline.hpp"
 #include "runtime/sharedRuntime.hpp"
@@ -107,8 +108,11 @@ VtableStub* VtableStubs::create_vtable_stub(int vtable_index) {
   }
 #endif // PRODUCT
 
-  __ mov_immediate(t3, vtable_index);
-  __ lookup_virtual_method(t2, t3, Rmethod);
+  // The index is a constant: one add, then the load (lookup_virtual_method
+  // with the shladd folded away).
+  __ add_imm(Rmethod, t2, in_bytes(Klass::vtable_start_offset() + vtableEntry::method_offset()) +
+                          vtable_index * vtableEntry::size_in_bytes(), t3);
+  __ Assembler::ld8(Rmethod, Rmethod);
 
 #ifndef PRODUCT
   if (DebugVtables) {
@@ -171,17 +175,10 @@ VtableStub* VtableStubs::create_itable_stub(int itable_index) {
   // get receiver klass (also an implicit null-check)
   address npe_addr = load_receiver_klass(masm, recv_klass_reg);
 
-  // Receiver subtype check against REFC.
-  // (method_result is scratch here: t2.)
-  __ lookup_interface_method(recv_klass_reg, resolved_klass_reg, noreg, t2, temp_reg,
-                             L_no_such_interface, /* return_method */ false);
-
-  // Get selected method from declaring class and itable index
-  // (lookup_interface_method destroys the receiver klass: reload it).
-  __ load_klass(recv_klass_reg, j_rarg0);
-  __ mov_immediate(Rmethod, itable_index);
-  __ lookup_interface_method(recv_klass_reg, holder_klass_reg, Rmethod, Rmethod, temp_reg,
-                             L_no_such_interface);
+  // Receiver subtype check against REFC, and the selected method from DEFC
+  // and the itable index, in one pass.
+  __ lookup_interface_method_stub(recv_klass_reg, holder_klass_reg, resolved_klass_reg, Rmethod,
+                                  temp_reg, t3, t4, itable_index, L_no_such_interface);
 
 #ifdef ASSERT
   if (DebugVtables) {

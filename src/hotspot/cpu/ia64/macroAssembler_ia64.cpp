@@ -940,6 +940,82 @@ void MacroAssembler::lookup_interface_method(Register recv_klass, Register intf_
   }
 }
 
+// Laid out for IA-64's lack of displacement addressing: every address the
+// hot path needs (the vtable length, recv_klass + vtable start, the method
+// base, the offset entry) is computed one group ahead of the load that
+// needs it, so the chain is length load -> shladd -> itable[0] -> offset ->
+// Method*.
+void MacroAssembler::lookup_interface_method_stub(Register recv_klass, Register holder_klass,
+                                                  Register resolved_klass, Register method_result,
+                                                  Register temp_itbl_klass, Register scan_temp,
+                                                  Register method_base, int itable_index,
+                                                  Label& L_no_such_interface) {
+  // method_result doubles as holder_offset until the very end.
+  Register holder_offset = method_result;
+  assert_different_registers(resolved_klass, recv_klass, holder_klass, temp_itbl_klass,
+                             scan_temp, holder_offset, method_base, t0);
+
+  const int vtable_start = in_bytes(Klass::vtable_start_offset());
+  const int scan_step    = itableOffsetEntry::size() * wordSize;
+  const int ioffset      = in_bytes(itableOffsetEntry::interface_offset());
+  const int ooffset      = in_bytes(itableOffsetEntry::offset_offset());
+  const int itmentry_off = in_bytes(itableMethodEntry::method_offset());
+  const int vte_scale    = exact_log2(vtableEntry::size_in_bytes());
+  assert(ioffset == 0, "scan_temp addresses the interface field");
+
+  Label L_loop_search_resolved_entry, L_resolved_found, L_holder_found;
+
+  // scan_temp = &itable[0]._interface, where the itable starts after the
+  // vtable: recv_klass + vtable_start + vtable_length * vtableEntry size.
+  adds(t0, in_bytes(Klass::vtable_length_offset()), recv_klass);
+  add_imm(method_base, recv_klass, (int64_t)itable_index * wordSize + itmentry_off, scan_temp);
+  Assembler::ld4(scan_temp, t0);
+  add_imm(temp_itbl_klass, recv_klass, vtable_start + ioffset, t0);
+  shladd(scan_temp, scan_temp, vte_scale, temp_itbl_klass);
+  Assembler::ld8(temp_itbl_klass, scan_temp);
+  mov(holder_offset, zr);
+
+  // if (holder_klass != resolved_klass) scan for resolved_klass;
+  // if (itable[0] == holder_klass) found; if (itable[0] == 0) no such interface.
+  bne(resolved_klass, holder_klass, L_loop_search_resolved_entry);
+  beq(holder_klass, temp_itbl_klass, L_holder_found);
+  beqz(temp_itbl_klass, L_no_such_interface);
+
+  // Look for holder_klass.
+  Label L_search_holder;
+  bind(L_search_holder);
+    adds(scan_temp, scan_step, scan_temp);
+    Assembler::ld8(temp_itbl_klass, scan_temp);
+    beq(holder_klass, temp_itbl_klass, L_holder_found);
+    bnez(temp_itbl_klass, L_search_holder);
+  j(L_no_such_interface);
+
+  // Look for resolved_klass, noting holder_klass's entry on the way.
+  Label L_loop_search_resolved;
+  bind(L_loop_search_resolved);
+    adds(scan_temp, scan_step, scan_temp);
+    Assembler::ld8(temp_itbl_klass, scan_temp);
+  bind(L_loop_search_resolved_entry);
+    beqz(temp_itbl_klass, L_no_such_interface);
+    beq(resolved_klass, temp_itbl_klass, L_resolved_found);
+    bne(holder_klass, temp_itbl_klass, L_loop_search_resolved);
+    mov(holder_offset, scan_temp);
+    j(L_loop_search_resolved);
+
+  // Already passed holder_klass? Otherwise scan on for it.
+  bind(L_resolved_found);
+  beqz(holder_offset, L_search_holder);
+  mov(scan_temp, holder_offset);
+
+  // scan_temp = &holder_klass's itableOffsetEntry: the method is at
+  // recv_klass + offset + itable_index * wordSize + itmentry_off.
+  bind(L_holder_found);
+  adds(t0, ooffset - ioffset, scan_temp);
+  Assembler::ld4(method_result, t0);
+  add(method_result, method_base, method_result);
+  Assembler::ld8(method_result, method_result);
+}
+
 void MacroAssembler::read_polling_page(Register poll) {
   relocate(relocInfo::poll_type);   // also closes any open bundle
   // A barrier bundle: nothing joins its group, so the fault names this

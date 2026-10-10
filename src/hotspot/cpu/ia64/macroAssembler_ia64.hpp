@@ -542,6 +542,18 @@ class MacroAssembler : public Assembler {
                                Register method_result, Register scan_tmp,
                                Label& L_no_such_interface, bool return_method = true);
 
+  // The itable stub's lookup in one pass over the itable (riscv's and x86's
+  // lookup_interface_method_stub): check that recv_klass implements
+  // resolved_klass (REFC) and find holder_klass (DEFC), then load the method
+  // at itable_index into method_result. On a miss branch to
+  // L_no_such_interface. Clobbers temp_itbl_klass, scan_temp, method_base
+  // and t0; recv_klass is preserved.
+  void lookup_interface_method_stub(Register recv_klass, Register holder_klass,
+                                    Register resolved_klass, Register method_result,
+                                    Register temp_itbl_klass, Register scan_temp,
+                                    Register method_base, int itable_index,
+                                    Label& L_no_such_interface);
+
   // C2's loop poll (ia64.ad safePoint): ld8 t1 = [poll], a bundle of its own
   // with a poll relocation. poll is the thread's polling page, which faults
   // when armed; NativeInstruction::is_safepoint_poll recognises the bundle.
