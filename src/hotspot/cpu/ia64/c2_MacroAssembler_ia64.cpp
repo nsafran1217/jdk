@@ -75,7 +75,31 @@ static ia64::Insn mem_insn(C2_MacroAssembler::MemOp op, int data, int addr) {
 // Emitted as barrier bundles (no Deps): neither bundle may lose its stop to
 // stop elision, so the access ends its instruction group and the next
 // instruction -- which may read the loaded register -- starts a new one.
-void C2_MacroAssembler::access(MemOp op, int data, Register base, int disp) {
+void C2_MacroAssembler::access(MemOp op, int data, Register base, int disp, bool packable) {
+  if (packable) {
+    Register addr = base;
+    bool int_load = (op == op_ld1 || op == op_ld2 || op == op_ld4 || op == op_ld8);
+    if (disp != 0) {
+      assert(ia64::is_simm14(disp), "indOffset14");
+      addr = int_load ? as_Register(data) : t0;
+      adds(addr, disp, base);
+    }
+    switch (op) {
+      case op_ld1:  Assembler::ld1(as_Register(data), addr); return;
+      case op_ld2:  Assembler::ld2(as_Register(data), addr); return;
+      case op_ld4:  Assembler::ld4(as_Register(data), addr); return;
+      case op_ld8:  Assembler::ld8(as_Register(data), addr); return;
+      case op_st1:  Assembler::st1(addr, as_Register(data)); return;
+      case op_st2:  Assembler::st2(addr, as_Register(data)); return;
+      case op_st4:  Assembler::st4(addr, as_Register(data)); return;
+      case op_st8:  Assembler::st8(addr, as_Register(data)); return;
+      case op_ldfs: Assembler::ldfs(as_FloatRegister(data), addr); return;
+      case op_ldfd: Assembler::ldfd(as_FloatRegister(data), addr); return;
+      case op_stfs: Assembler::stfs(addr, as_FloatRegister(data)); return;
+      case op_stfd: Assembler::stfd(addr, as_FloatRegister(data)); return;
+      default: ShouldNotReachHere();
+    }
+  }
   close_bundle();
   if (disp == 0) {
     emit_bundle(ia64::BundleM(mem_insn(op, data, base->encoding())));

@@ -44,7 +44,14 @@
   // is what makes implicit null checks work: the signal handler looks the
   // fault up at the bundle address. data is the register loaded or stored
   // (a GR or FR encoding, by op).
-  void access(MemOp op, int data, Register base, int disp);
+  //
+  // packable: none of that is needed (the node is not an implicit null
+  // check's faulting access, and the method has no Unsafe accesses, whose
+  // fault handler resumes at the next bundle): emit ordinary instructions
+  // the packer may share bundles with, the address in the loaded register
+  // (t0 for FP loads and for stores). Acquire/release forms always use the
+  // single-bundle form.
+  void access(MemOp op, int data, Register base, int disp, bool packable = false);
 
   // ---- compare and branch (C2-DESIGN.md section 4) ---------------------------
   //

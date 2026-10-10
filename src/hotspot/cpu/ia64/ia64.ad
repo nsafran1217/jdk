@@ -651,6 +651,11 @@ inline bool call_through_descriptor(address entry) {
   return !CodeCache::contains(entry) || MacroAssembler::is_function_entry(entry);
 }
 
+// Whether a memory node may be emitted as packable instructions
+// (C2_MacroAssembler::access): under UseC2BundlePacking, unless it is an
+// implicit null check's faulting access or the method has Unsafe accesses.
+bool packable_access(const MachNode* n);
+
 // Barrier folding (C2-DESIGN.md section 9): which MemBarAcquire/Release
 // nodes an ld.acq/st.rel/cmpxchg.acq already implements.
 bool unnecessary_acquire(const Node* barrier);
@@ -675,6 +680,18 @@ source %{
 // REQUIRED FUNCTIONALITY
 
 void PhaseOutput::pd_perform_mach_node_analysis() {
+}
+
+bool packable_access(const MachNode* n) {
+  if (!UseC2BundlePacking || Compile::current()->has_unsafe_access()) {
+    return false;
+  }
+  for (DUIterator_Fast imax, i = n->fast_outs(imax); i < imax; i++) {
+    if (n->fast_out(i)->is_MachNullCheck()) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Every acquiring load is emitted with acquire semantics itself: ldN.acq for
@@ -3965,7 +3982,7 @@ instruct loadB(iRegI dst, memory mem)
   format %{ "ld1 + sxt1, byte  $dst, $mem\t# @loadB" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld1, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld1, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
     __ sxt1($dst$$Register, $dst$$Register);
   %}
 
@@ -3981,7 +3998,7 @@ instruct loadB2L(iRegL dst, memory mem)
   format %{ "ld1 + sxt1, byte -> long  $dst, $mem\t# @loadB2L" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld1, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld1, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
     __ sxt1($dst$$Register, $dst$$Register);
   %}
 
@@ -3997,7 +4014,7 @@ instruct loadUB(iRegI dst, memory mem)
   format %{ "ld1, ubyte  $dst, $mem\t# @loadUB" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld1, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld1, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
     
   %}
 
@@ -4013,7 +4030,7 @@ instruct loadUB2L(iRegL dst, memory mem)
   format %{ "ld1, ubyte -> long  $dst, $mem\t# @loadUB2L" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld1, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld1, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
     
   %}
 
@@ -4029,7 +4046,7 @@ instruct loadS(iRegI dst, memory mem)
   format %{ "ld2 + sxt2, short  $dst, $mem\t# @loadS" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld2, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld2, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
     __ sxt2($dst$$Register, $dst$$Register);
   %}
 
@@ -4045,7 +4062,7 @@ instruct loadS2L(iRegL dst, memory mem)
   format %{ "ld2 + sxt2, short -> long  $dst, $mem\t# @loadS2L" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld2, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld2, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
     __ sxt2($dst$$Register, $dst$$Register);
   %}
 
@@ -4061,7 +4078,7 @@ instruct loadUS(iRegI dst, memory mem)
   format %{ "ld2, char  $dst, $mem\t# @loadUS" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld2, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld2, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
     
   %}
 
@@ -4077,7 +4094,7 @@ instruct loadUS2L(iRegL dst, memory mem)
   format %{ "ld2, char -> long  $dst, $mem\t# @loadUS2L" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld2, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld2, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
     
   %}
 
@@ -4093,7 +4110,7 @@ instruct loadI(iRegI dst, memory mem)
   format %{ "ld4, int (upper half undefined)  $dst, $mem\t# @loadI" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld4, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld4, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
     
   %}
 
@@ -4109,7 +4126,7 @@ instruct loadI2L(iRegL dst, memory mem)
   format %{ "ld4 + sxt4, int -> long  $dst, $mem\t# @loadI2L" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld4, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld4, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
     __ sxt4($dst$$Register, $dst$$Register);
   %}
 
@@ -4125,7 +4142,7 @@ instruct loadUI2L(iRegL dst, memory mem, immL_32bits mask)
   format %{ "ld4, uint -> long  $dst, $mem\t# @loadUI2L" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld4, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld4, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
     
   %}
 
@@ -4141,7 +4158,7 @@ instruct loadL(iRegL dst, memory mem)
   format %{ "ld8, long  $dst, $mem\t# @loadL" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld8, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld8, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
     
   %}
 
@@ -4156,7 +4173,7 @@ instruct loadRange(iRegI dst, memory mem)
   format %{ "ld4, range  $dst, $mem\t# @loadRange" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld4, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld4, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
     
   %}
 
@@ -4172,7 +4189,7 @@ instruct loadP(iRegPNoSp dst, memory mem)
   format %{ "ld8  $dst, $mem\t# ptr, @loadP" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld8, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld8, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4314,7 +4331,7 @@ instruct loadF_acq(fRegF dst, memory mem)
   format %{ "ldfs + mf, float  $dst, $mem\t# @loadF_acq" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ldfs, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ldfs, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
     __ mf();
   %}
 
@@ -4331,7 +4348,7 @@ instruct loadD_acq(fRegD dst, memory mem)
   format %{ "ldfd + mf, double  $dst, $mem\t# @loadD_acq" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ldfd, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ldfd, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
     __ mf();
   %}
 
@@ -4346,7 +4363,7 @@ instruct loadKlass(iRegPNoSp dst, memory mem)
   format %{ "ld8  $dst, $mem\t# class, @loadKlass" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld8, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld8, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4362,7 +4379,7 @@ instruct loadNKlass(iRegN dst, memory mem)
   format %{ "ld4  $dst, $mem\t# compressed class, @loadNKlass" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld4, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld4, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4380,7 +4397,7 @@ instruct loadN(iRegN dst, memory mem)
   format %{ "ld4  $dst, $mem\t# compressed ptr, @loadN" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ld4, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ld4, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4395,7 +4412,7 @@ instruct storeN(iRegN src, memory mem)
   format %{ "st4  $src, $mem\t# compressed ptr, @storeN" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st4, $src$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_st4, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4410,7 +4427,7 @@ instruct loadF(fRegF dst, memory mem)
   format %{ "ldfs  $dst, $mem\t# float, @loadF" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ldfs, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ldfs, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4425,7 +4442,7 @@ instruct loadD(fRegD dst, memory mem)
   format %{ "ldfd  $dst, $mem\t# double, @loadD" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_ldfd, $dst$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_ldfd, $dst$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4440,7 +4457,7 @@ instruct storeB(iRegIorL2I src, memory mem)
   format %{ "st1  $src, $mem\t# @storeB" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st1, $src$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_st1, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4455,7 +4472,7 @@ instruct storeC(iRegIorL2I src, memory mem)
   format %{ "st2  $src, $mem\t# @storeC" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st2, $src$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_st2, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4470,7 +4487,7 @@ instruct storeI(iRegIorL2I src, memory mem)
   format %{ "st4  $src, $mem\t# @storeI" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st4, $src$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_st4, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4485,7 +4502,7 @@ instruct storeL(iRegL src, memory mem)
   format %{ "st8  $src, $mem\t# @storeL" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st8, $src$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_st8, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4499,7 +4516,7 @@ instruct storeNKlass(iRegN src, memory mem)
   format %{ "st4  $src, $mem\t# @storeNKlass" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st4, $src$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_st4, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4514,7 +4531,7 @@ instruct storeimmB0(immI0 zero, memory mem)
   format %{ "st1  r0, $mem\t# @storeimmB0" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st1, zr->encoding(), as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_st1, zr->encoding(), as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4529,7 +4546,7 @@ instruct storeimmC0(immI0 zero, memory mem)
   format %{ "st2  r0, $mem\t# @storeimmC0" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st2, zr->encoding(), as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_st2, zr->encoding(), as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4544,7 +4561,7 @@ instruct storeimmI0(immI0 zero, memory mem)
   format %{ "st4  r0, $mem\t# @storeimmI0" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st4, zr->encoding(), as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_st4, zr->encoding(), as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4559,7 +4576,7 @@ instruct storeimmL0(immL0 zero, memory mem)
   format %{ "st8  r0, $mem\t# @storeimmL0" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st8, zr->encoding(), as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_st8, zr->encoding(), as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4574,7 +4591,7 @@ instruct storeP(iRegP src, memory mem)
   format %{ "st8  $src, $mem\t# ptr, @storeP" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st8, $src$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_st8, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4589,7 +4606,7 @@ instruct storeimmP0(immP0 zero, memory mem)
   format %{ "st8  r0, $mem\t# ptr, @storeimmP0" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_st8, zr->encoding(), as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_st8, zr->encoding(), as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4770,7 +4787,7 @@ instruct storeF(fRegF src, memory mem)
   format %{ "stfs  $src, $mem\t# float, @storeF" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_stfs, $src$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_stfs, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
@@ -4784,7 +4801,7 @@ instruct storeD(fRegD src, memory mem)
   format %{ "stfd  $src, $mem\t# double, @storeD" %}
 
   ins_encode %{
-    __ access(C2_MacroAssembler::op_stfd, $src$$reg, as_Register($mem$$base), $mem$$disp);
+    __ access(C2_MacroAssembler::op_stfd, $src$$reg, as_Register($mem$$base), $mem$$disp, packable_access(this));
   %}
 
   ins_pipe(pipe_class_memory);
