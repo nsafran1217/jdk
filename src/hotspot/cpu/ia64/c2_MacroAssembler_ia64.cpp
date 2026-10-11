@@ -193,72 +193,87 @@ static void set_flags(C2_MacroAssembler* masm, bool success) {
 // lock CASes the owner from null to this thread's owner id or counts a
 // recursion; unlock counts a recursion down or releases the owner, and
 // leaves the runtime only a monitor with waiters but no successor.
+//
+// Both are laid out for instruction groups rather than instructions: every
+// address is formed a group ahead of its load, and the compares that decide
+// the result write RFLAGS (p10 = success) themselves, so the common paths are
+// 7 (lock) and 8 (unlock) groups. Lock issues its CAS as soon as the lock-stack
+// is known to have room, before the recursion and monitor tests: with a
+// fast-locked (0b00) or monitor (0b10) mark the comparand mark | 0b01 cannot
+// match, so the CAS fails harmlessly and those tests then run as before.
 void C2_MacroAssembler::fast_lock_lightweight(Register obj, Register box, Register tmp1,
                                               Register tmp2, Register tmp3) {
   assert(LockingMode == LM_LIGHTWEIGHT, "must be");
   assert_different_registers(obj, box, tmp1, tmp2, tmp3, t0, t1, t2);
-  Label slow, done, locked, inflated, push;
-  const Register mark = tmp1, top = tmp2, t = tmp3;
+  Label slow, done, locked, inflated, push, cas_failed;
+  const Register slot = tmp1, top = tmp2, last = tmp3, expected = t0, desired = t1, old = t2;
+  const PredicateRegister monitor = p8;
+  const int top_offset = in_bytes(JavaThread::lock_stack_top_offset());
+  assert(ia64::is_simm14(top_offset) && ia64::is_simm14(LockStack::end_offset()), "imm14");
 
   if (UseObjectMonitorTable) {
     // Clear the cache in case fast locking succeeds or we take the slow path.
-    st8(Address(box, BasicLock::object_monitor_cache_offset_in_bytes()), zr, t);
+    st8(Address(box, BasicLock::object_monitor_cache_offset_in_bytes()), zr, t0);
   }
   if (DiagnoseSyncOnValueBasedClasses != 0) {
-    load_klass(t, obj);
-    ld1(t, Address(t, Klass::misc_flags_offset()));
+    load_klass(t0, obj);
+    ld1(t0, Address(t0, Klass::misc_flags_offset()));
     assert(ia64::is_simm8(KlassFlags::_misc_is_value_based_class), "imm8");
-    and_imm(t, KlassFlags::_misc_is_value_based_class, t);
-    bnez(t, slow);
+    and_imm(t0, KlassFlags::_misc_is_value_based_class, t0);
+    bnez(t0, slow);
   }
 
   assert(oopDesc::mark_offset_in_bytes() == 0, "the cmpxchg below addresses the mark word as obj");
+  const Register mark = slot;                           // until the CAS is issued
   Assembler::ld8(mark, obj);
-
+  adds(last, top_offset, Rthread);
+  adds(old, LockStack::end_offset(), zr);
+  adds(desired, -oopSize, Rthread);
+  Assembler::ld4(top, last);
+  or_imm(expected, markWord::unlocked_value, mark);    // expected: unlocked
+  tbit_nz(monitor, p9, mark, exact_log2(markWord::monitor_value));
   // Lock-stack full?
-  ld4(top, Address(Rthread, JavaThread::lock_stack_top_offset()));
-  mov(t, (int64_t)LockStack::end_offset());
-  bgeu(top, t, slow);
-
-  // Recursive?
-  add(t, Rthread, top);
-  ld8(t, Address(t, -oopSize));
-  beq(obj, t, push);
-
-  // Monitor (0b10)?
-  and_imm(t, markWord::monitor_value, mark);
-  bnez(t, inflated);
-
-  // Lock bits 0b01 => 0b00.
-  or_imm(mark, markWord::unlocked_value, mark);        // expected: unlocked
-  and_imm(t, ~(int64_t)markWord::unlocked_value, mark); // new: locked
-  mov_to_ar_ccv(mark);
-  cmpxchg8_acq(t2, obj, t);
-  bne(mark, t2, slow);
-
-  bind(push);
-  add(t, Rthread, top);
-  Assembler::st8(t, obj);
+  cmp_ltu(ptmp1, ptmp0, top, old);
+  add(last, desired, top);                              // &lock_stack[top - 1]
+  and_imm(desired, ~(int64_t)markWord::unlocked_value, mark);  // desired: locked
+  mov_to_ar_ccv(expected);
+  br_cond(slow, ptmp0);
+  Assembler::ld8(last, last);
+  cmpxchg8_acq(old, obj, desired);
+  add(slot, Rthread, top);                              // &lock_stack[top]
   adds(top, oopSize, top);
-  st4(Address(Rthread, JavaThread::lock_stack_top_offset()), top, t);
-  j(locked);
+  cmp_eq(p10, p11, old, expected);
+  br_cond(cas_failed, p11);
+
+  bind(push);                                           // p10 is set
+  Assembler::st8(slot, obj);
+  adds(t0, top_offset, Rthread);
+  Assembler::st4(t0, top);
+  j(done);
+
+  bind(cas_failed);
+  // Recursive?
+  cmp_eq(p10, p11, obj, last);
+  br_cond(push, p10);
+  // Monitor (0b10)? The mark is expected - 0b01.
+  br_cond(inflated, monitor);
+  j(slow);
 
   bind(inflated);
   if (UseObjectMonitorTable) {
     j(slow);
   } else {
-    // mark is the monitor pointer tagged with monitor_value.
-    const int tag = checked_cast<int>(markWord::monitor_value);
-    const Register owner_addr = top, tid = t;
-    Label monitor_locked;
-    add_imm(owner_addr, mark, in_bytes(ObjectMonitor::owner_offset()) - tag);
+    // expected is the monitor pointer tagged with monitor_value | unlocked_value.
+    const int tag = checked_cast<int>(markWord::monitor_value | markWord::unlocked_value);
+    const Register owner_addr = top, tid = last;
+    add_imm(owner_addr, expected, in_bytes(ObjectMonitor::owner_offset()) - tag, tid);  // not t0
     ld8(tid, Address(Rthread, JavaThread::monitor_owner_id_offset()));
     mov_to_ar_ccv(zr);                                  // no owner
     cmpxchg8_acq(t2, owner_addr, tid);
     beqz(t2, locked);
     bne(t2, tid, slow);                                 // owned by another
     // Recursive.
-    add_imm(owner_addr, mark, in_bytes(ObjectMonitor::recursions_offset()) - tag);
+    add_imm(owner_addr, expected, in_bytes(ObjectMonitor::recursions_offset()) - tag, tid);
     Assembler::ld8(t2, owner_addr);
     adds(t2, 1, t2);
     Assembler::st8(owner_addr, t2);
@@ -277,43 +292,49 @@ void C2_MacroAssembler::fast_unlock_lightweight(Register obj, Register box, Regi
   assert(LockingMode == LM_LIGHTWEIGHT, "must be");
   assert_different_registers(obj, box, tmp1, tmp2, tmp3, t0, t1, t2);
   Label slow, done, unlocked, inflated, inflated_load_mark, push_and_slow;
-  const Register mark = tmp1, top = tmp2, t = tmp3;
+  const Register mark = tmp1, top = tmp2, top_addr = tmp3, unlocked_mark = t0, e1 = t1, e2 = t2;
+  const PredicateRegister monitor = p8, not_monitor = p9;
+  const int top_offset = in_bytes(JavaThread::lock_stack_top_offset());
+  assert(ia64::is_simm14(top_offset), "imm14");
 
-  // Is obj the top of the lock-stack?
-  ld4(top, Address(Rthread, JavaThread::lock_stack_top_offset()));
+  // Is obj the top of the lock-stack (e1), and is the entry below it obj too (e2:
+  // a recursion)? Below the first entry is the lock-stack's bad-oop sentinel.
+  assert(oopDesc::mark_offset_in_bytes() == 0, "the cmpxchg below addresses the mark word as obj");
+  Assembler::ld8(mark, obj);
+  adds(top_addr, top_offset, Rthread);
+  adds(e1, -oopSize, Rthread);
+  adds(e2, -2 * oopSize, Rthread);
+  Assembler::ld4(top, top_addr);
+  or_imm(unlocked_mark, markWord::unlocked_value, mark);  // lock bits 0b00 => 0b01
+  tbit_nz(monitor, not_monitor, mark, exact_log2(markWord::monitor_value));
+  mov_to_ar_ccv(mark);
+  add(e1, e1, top);
+  add(e2, e2, top);
   adds(top, -oopSize, top);
-  add(t, Rthread, top);
-  Assembler::ld8(t, t);
-  bne(obj, t, inflated_load_mark);
+  Assembler::ld8(e1, e1);
+  Assembler::ld8(e2, e2);
+  cmp_ne(ptmp0, ptmp1, obj, e1);
+  cmp_eq(p10, p11, obj, e2);
+  DEBUG_ONLY(add(e1, Rthread, top);)
+  br_cond(inflated_load_mark, ptmp0);
 
-  // Pop the lock-stack.
-  DEBUG_ONLY(add(t, Rthread, top);)
-  DEBUG_ONLY(Assembler::st8(t, zr);)
-  st4(Address(Rthread, JavaThread::lock_stack_top_offset()), top, t);
-
-  // Recursive?
-  add(t, Rthread, top);
-  ld8(t, Address(t, -oopSize));
-  beq(obj, t, unlocked);
+  // Pop the lock-stack; a recursion is then done (p10 is set).
+  DEBUG_ONLY(Assembler::st8(e1, zr);)
+  Assembler::st4(top_addr, top);
+  br_cond(done, p10);
 
   // Not recursive. A monitor here means the runtime must fix an anonymous
   // owner: push obj back first.
-  assert(oopDesc::mark_offset_in_bytes() == 0, "the cmpxchg below addresses the mark word as obj");
-  Assembler::ld8(mark, obj);
-  and_imm(t, markWord::monitor_value, mark);
-  bnez(t, UseObjectMonitorTable ? push_and_slow : inflated);
-
-  // Lock bits 0b00 => 0b01.
-  or_imm(t, markWord::unlocked_value, mark);
-  mov_to_ar_ccv(mark);
-  cmpxchg8_rel(t2, obj, t);
-  beq(mark, t2, unlocked);
+  cmpxchg8_rel(e2, obj, unlocked_mark, not_monitor);
+  br_cond(UseObjectMonitorTable ? push_and_slow : inflated, monitor);
+  cmp_eq(p10, p11, e2, mark);
+  br_cond(done, p10);
 
   bind(push_and_slow);
-  DEBUG_ONLY(add(t, Rthread, top);)
-  DEBUG_ONLY(Assembler::st8(t, obj);)
+  DEBUG_ONLY(add(e1, Rthread, top);)
+  DEBUG_ONLY(Assembler::st8(e1, obj);)
   adds(top, oopSize, top);
-  st4(Address(Rthread, JavaThread::lock_stack_top_offset()), top, t);
+  Assembler::st4(top_addr, top);
   j(slow);
 
   bind(inflated_load_mark);
@@ -324,15 +345,15 @@ void C2_MacroAssembler::fast_unlock_lightweight(Register obj, Register box, Regi
   } else {
 #ifdef ASSERT
     Label is_monitor;
-    and_imm(t, markWord::monitor_value, mark);
-    bnez(t, is_monitor);
+    and_imm(t0, markWord::monitor_value, mark);
+    bnez(t0, is_monitor);
     stop("fast_unlock_lightweight: not a monitor");
     bind(is_monitor);
 #endif
-    const Register monitor = mark, addr = top;
+    const Register mon = mark, addr = top, t = tmp3;
     Label not_recursive;
-    adds(monitor, -checked_cast<int>(markWord::monitor_value), mark);
-    add_imm(addr, monitor, in_bytes(ObjectMonitor::recursions_offset()));
+    adds(mon, -checked_cast<int>(markWord::monitor_value), mark);
+    add_imm(addr, mon, in_bytes(ObjectMonitor::recursions_offset()));
     Assembler::ld8(t, addr);
     beqz(t, not_recursive);
     adds(t, -1, t);
@@ -343,17 +364,17 @@ void C2_MacroAssembler::fast_unlock_lightweight(Register obj, Register box, Regi
     // Release the owner (st8.rel orders everything before it), then a full
     // fence so that the entry_list/succ loads cannot pass the store: the
     // StoreLoad that keeps a waiter from being stranded.
-    add_imm(addr, monitor, in_bytes(ObjectMonitor::owner_offset()));
+    add_imm(addr, mon, in_bytes(ObjectMonitor::owner_offset()));
     st8_rel(addr, zr);
     mf();
-    add_imm(addr, monitor, in_bytes(ObjectMonitor::entry_list_offset()));
+    add_imm(addr, mon, in_bytes(ObjectMonitor::entry_list_offset()));
     Assembler::ld8(t, addr);
     beqz(t, unlocked);                                  // nobody waiting
-    add_imm(addr, monitor, in_bytes(ObjectMonitor::succ_offset()));
+    add_imm(addr, mon, in_bytes(ObjectMonitor::succ_offset()));
     Assembler::ld8(t, addr);
     bnez(t, unlocked);                                  // a successor will take it
     // Let SharedRuntime::monitor_exit_helper try to reacquire and hand off.
-    st8(Address(Rthread, JavaThread::unlocked_inflated_monitor_offset()), monitor, t);
+    st8(Address(Rthread, JavaThread::unlocked_inflated_monitor_offset()), mon, t);
     j(slow);
   }
 
