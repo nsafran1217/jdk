@@ -661,7 +661,8 @@ inline bool epilog_returns(const Compile* C) {
 
 // Whether a memory node may be emitted as packable instructions
 // (C2_MacroAssembler::access): under UseC2BundlePacking, unless it is an
-// implicit null check's faulting access or the method has Unsafe accesses.
+// implicit null check's faulting access, or the method has Unsafe accesses
+// and this one is not known to address the Java heap.
 bool packable_access(const MachNode* n);
 
 // Peephole procedures (the PEEPHOLE RULES at the end of this file).
@@ -708,8 +709,19 @@ void PhaseOutput::pd_perform_mach_node_analysis() {
 }
 
 bool packable_access(const MachNode* n) {
-  if (!UseC2BundlePacking || Compile::current()->has_unsafe_access()) {
+  if (!UseC2BundlePacking) {
     return false;
+  }
+  if (Compile::current()->has_unsafe_access()) {
+    // A SIGBUS in such a method resumes at the next bundle
+    // (handle_unsafe_access), which must then hold nothing else of the
+    // method: emit the access in a bundle of its own. Only an off-heap
+    // address can raise that SIGBUS (a truncated mapped file), so accesses
+    // known to be in the Java heap stay packable.
+    const TypePtr* at = n->adr_type();
+    if (at == nullptr || at->isa_oopptr() == nullptr) {
+      return false;
+    }
   }
   for (DUIterator_Fast imax, i = n->fast_outs(imax); i < imax; i++) {
     if (n->fast_out(i)->is_MachNullCheck()) {
