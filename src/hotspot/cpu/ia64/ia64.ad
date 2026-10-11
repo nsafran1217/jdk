@@ -664,6 +664,13 @@ inline bool epilog_returns(const Compile* C) {
 // implicit null check's faulting access or the method has Unsafe accesses.
 bool packable_access(const MachNode* n);
 
+// Peephole procedures (the PEEPHOLE RULES at the end of this file).
+class Peephole {
+ public:
+  static bool split_offset_load(Block* block, int block_index, PhaseCFG* cfg_, PhaseRegAlloc* ra_,
+                                MachNode* (*new_root)(), uint inst0_rule);
+};
+
 // Whether a store is emitted as st.rel: as aarch64, only a store with a
 // trailing membar (a volatile store, whose leading MemBarRelease it then
 // implements). C2 marks every reference store releasing
@@ -710,6 +717,59 @@ bool packable_access(const MachNode* n) {
     }
   }
   return true;
+}
+
+// An integer load at base + offset is an adds into its destination
+// register and the access through it (C2_MacroAssembler::access), two
+// instruction groups inside one node, so the post-allocation scheduler
+// cannot overlap the adds with other nodes: two independent field loads
+// take four groups where two would do. After register allocation this
+// splits the load into an addP_reg_imm writing the destination register
+// (the new root) and the load through it, which the scheduler then orders
+// like any other pair. The adds node carries the access's address type, so
+// the load's adr_type() is unchanged, and it is never live across a
+// safepoint: its one use follows it in the same block, and safepoints end
+// blocks. Only packable accesses are split: an implicit null check's load
+// must fault at its node's first bundle. Returns false whatever it does:
+// PhasePeephole walks the block backwards, so it goes on at the node that
+// preceded the load, and nothing needs rescanning.
+bool Peephole::split_offset_load(Block* block, int block_index, PhaseCFG* cfg_, PhaseRegAlloc* ra_,
+                                 MachNode* (*new_root)(), uint inst0_rule) {
+  MachNode* ld = block->get_node(block_index)->as_Mach();
+  assert(ld->rule() == inst0_rule, "sanity");
+  if (!UseC2SplitOffsetLoads || ld->_opnds[1]->opcode() != INDOFFSET14 || !packable_access(ld)) {
+    return false;
+  }
+  OptoReg::Name dst = ra_->get_reg_first(ld);
+  if (!OptoReg::is_reg(dst) || !OptoReg::as_VMReg(dst)->is_Register()) {
+    return false;
+  }
+  if (Compile::current()->unique() + 1 >= ra_->node_regs_max_index()) {
+    return false;
+  }
+  const uint base_idx = ld->operand_index(1u);
+  Node* base = ld->in(base_idx);
+  const jlong disp = ld->_opnds[1]->constant_disp();
+  const TypePtr* adr_type = ld->adr_type();
+
+  MachNode* add = new_root();
+  add->add_req(nullptr);                      // control
+  add->add_req(base);                         // AddP base
+  add->add_req(base);                         // address
+  add->_opnds[0] = new iRegPNoSpOper();
+  add->_opnds[1] = new iRegPOper();
+  add->_opnds[2] = new immL14Oper(disp);
+  static_cast<MachTypeNode*>(add)->_bottom_type = adr_type;
+  ra_->set_pair(add->_idx, OptoReg::add(dst, 1), dst);
+  ra_->set_oop(add, false);
+
+  ld->_opnds[1] = new indirectOper();
+  ld->set_req(base_idx, add);
+  assert(ld->adr_type() == adr_type, "the split must keep the load's alias class");
+
+  block->insert_node(add, block_index);
+  cfg_->map_node_to_block(add, block);
+  return false;
 }
 
 // Every acquiring load is emitted with acquire semantics itself: ldN.acq for
@@ -7399,6 +7459,128 @@ instruct clearArray_reg_reg(iRegL_R20 cnt, iRegP_R21 base, Universe dummy)
 //----------PEEPHOLE RULES-----------------------------------------------------
 // These must follow all instruction definitions as they use the names
 // defined in the instructions definitions.
+
+// Integer loads at base + offset: split the address adds off after register
+// allocation (Peephole::split_offset_load).
+
+peephole
+%{
+  peepmatch (loadB);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
+
+peephole
+%{
+  peepmatch (loadB2L);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
+
+peephole
+%{
+  peepmatch (loadUB);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
+
+peephole
+%{
+  peepmatch (loadUB2L);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
+
+peephole
+%{
+  peepmatch (loadS);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
+
+peephole
+%{
+  peepmatch (loadS2L);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
+
+peephole
+%{
+  peepmatch (loadUS);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
+
+peephole
+%{
+  peepmatch (loadUS2L);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
+
+peephole
+%{
+  peepmatch (loadI);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
+
+peephole
+%{
+  peepmatch (loadI2L);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
+
+peephole
+%{
+  peepmatch (loadUI2L);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
+
+peephole
+%{
+  peepmatch (loadL);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
+
+peephole
+%{
+  peepmatch (loadRange);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
+
+peephole
+%{
+  peepmatch (loadP);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
+
+peephole
+%{
+  peepmatch (loadKlass);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
+
+peephole
+%{
+  peepmatch (loadNKlass);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
+
+peephole
+%{
+  peepmatch (loadN);
+  peepprocedure (split_offset_load);
+  peepreplace (addP_reg_imm());
+%}
 
 // Local Variables:
 // mode: c++

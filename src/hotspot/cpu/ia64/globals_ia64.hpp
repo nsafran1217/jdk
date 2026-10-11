@@ -162,6 +162,11 @@ define_pd_global(intx, InlineSmallCode, 7500);
                                                                                  \
   product(bool, UseC2BundlePacking, true, DIAGNOSTIC,                            \
           "Pack C2 code up to three instructions per bundle, across node "     \
-          "boundaries (with UseBundlePacking)")
+          "boundaries (with UseBundlePacking)")                            \
+                                                                                 \
+  product(bool, UseC2SplitOffsetLoads, true, DIAGNOSTIC,                         \
+          "Split C2 integer loads at base + offset into the address adds "     \
+          "and the access after register allocation, so the scheduler can "    \
+          "overlap the adds with other nodes (a peephole in ia64.ad)")
 
 #endif // CPU_IA64_GLOBALS_IA64_HPP

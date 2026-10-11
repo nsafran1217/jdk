@@ -68,7 +68,7 @@ define_pd_global(intx, RegisterCostAreaRatio,        16000);
 
 // Peephole and CISC spilling both break the graph, and so make the
 // scheduler sick.
-define_pd_global(bool, OptoPeephole,                 false);
+define_pd_global(bool, OptoPeephole,                 true);
 define_pd_global(bool, UseCISCSpill,                 false);
 // Latency scheduling with the Itanium 2 model in ia64.ad's pipeline block;
 // the emit-time packer forms the bundles (C2-DESIGN.md section 11). JDK 6
