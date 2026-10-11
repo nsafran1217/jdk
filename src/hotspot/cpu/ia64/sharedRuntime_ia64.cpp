@@ -892,18 +892,9 @@ static nmethod* generate_jni_wrapper(MacroAssembler* masm,
   __ bang_stack_with_offset(checked_cast<int>(StackOverflow::stack_shadow_zone_size()));
 
   // Generate a new frame for the wrapper: enter()'s shape at stack_size
-  // (C1_MacroAssembler::build_frame). t2/t3 are free at a method entry.
-  __ mov_from_br(t2, breturn);
-  __ mov(t3, sp);
-  __ add_imm(sp, sp, -stack_size);
-  __ adds(t1, frame::return_addr_offset * wordSize, t3);
-  __ Assembler::st8(t1, t2);
-  __ adds(t1, frame::link_offset * wordSize, t3);
-  __ Assembler::st8(t1, fp);
-  __ mov(fp, t3);
-
+  // (C1_MacroAssembler::build_frame), with the entry barrier.
   BarrierSetAssembler* bs = BarrierSet::barrier_set()->barrier_set_assembler();
-  bs->nmethod_entry_barrier(masm);
+  bs->build_frame_with_entry_barrier(masm, stack_size);
 
   // Frame is now completed as far as size and linkage.
   int frame_complete = ((intptr_t)__ pc()) - start;

@@ -925,14 +925,14 @@ void MachPrologNode::emit(C2_MacroAssembler* masm, PhaseRegAlloc* ra_) const {
     __ generate_stack_overflow_check(bangsize);
   }
 
-  // As C1_MacroAssembler::build_frame.
-  __ build_frame_linkage(framesize);
-
+  // As C1_MacroAssembler::build_frame. The entry barrier must end the
+  // prologue: BarrierSetNMethod finds the guard at a fixed distance before
+  // the frame-complete offset.
   if (C->stub_function() == nullptr) {
-    // Must end the prologue: BarrierSetNMethod finds the guard at a fixed
-    // distance before the frame-complete offset.
     BarrierSetAssembler* bs = BarrierSet::barrier_set()->barrier_set_assembler();
-    bs->nmethod_entry_barrier(masm);
+    bs->build_frame_with_entry_barrier(masm, framesize);
+  } else {
+    __ build_frame_linkage(framesize);
   }
 
   if (VerifyStackAtCalls) {

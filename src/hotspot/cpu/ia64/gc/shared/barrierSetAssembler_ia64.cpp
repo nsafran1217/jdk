@@ -128,23 +128,13 @@ void BarrierSetAssembler::tlab_allocate(MacroAssembler* masm, Register obj,
 // nmethod entry barrier (FRAME-DESIGN.md 11.3), emitted at the end of a
 // compiled method's prologue. Fixed length -- BarrierSetNMethod finds the
 // guard from the frame-complete offset -- and the guard is a data word inline
-// in the code, branched over like far_call's cell, so arming and disarming
-// are plain aligned 4-byte stores with no instruction patching:
+// in the code, so arming and disarming are plain aligned 4-byte stores with no
+// instruction patching. The guard is loaded with acquire, so the method's
+// subsequent loads of oops (patched by the disarming thread before its
+// release store of the guard) are ordered after it: conc_data_patch
+// semantics. t0-t2, b7 and p6/p7 are free at a method entry; the stub
+// preserves everything else.
 //
-//     br over                       (bundle 0)
-//     <guard: int32, 12 bytes pad>  (bundle 1)
-//  over:
-//     mov t0 = ip ; adds t0 = -16, t0 ; ld4.acq t0 = [t0]
-//     adds t1 = <disarmed offset>, Rthread ; ld4 t1 = [t1]
-//     cmp4.eq p6, p7 = t0, t1
-//     (p6) br skip
-//     far_call method_entry_barrier stub   (7 bundles)
-//  skip:
-//
-// The guard is loaded with acquire, so the method's subsequent loads of oops
-// (patched by the disarming thread before its release store of the guard)
-// are ordered after it: conc_data_patch semantics. t0, t1 and p6/p7 are free
-// at a method entry; the stub preserves everything else.
 // Five hand-bundled bundles, four instruction groups, no taken branch:
 //
 //  B0  { adds t1 = disarmed_off, Rthread ; movl t2 = method_entry_barrier }
@@ -185,6 +175,65 @@ void BarrierSetAssembler::nmethod_entry_barrier(MacroAssembler* masm) {
   __ emit_bundle(MakeBundle(tMIB_, Cmp4Ne(ptmp0.encoding(), ptmp1.encoding(), t0->encoding(), t1->encoding()),
                             NopI(), BrCall(breturn.encoding(), b7.encoding(), ptmp0.encoding(), kIndSpnt)));
   assert(__ offset() - start == entry_barrier_size, "entry_barrier_size is wrong");
+}
+
+// The frame linkage and the entry barrier in one hand-bundled sequence: seven
+// bundles, four instruction groups, against two or three groups for
+// build_frame_linkage followed by the barrier's four. Only the call to the
+// stub needs the frame complete (the stub may discard it), so everything
+// else overlaps the frame's stores, which keep a group each
+// (Assembler::is_store).
+//
+//  B0  { adds t1 = ra_off, sp ; adds t4 = link_off, sp ; mov t2 = b0 }
+//  B1  { adds t0 = disarmed_off, Rthread ; adds sp = -framesize, sp ; mov t3 = ip ;; }
+//  B2  { st8 [t1] = t2 ; ld4 t0 = [t0] ; adds t3 = guard - B1, t3 }
+//  B3  { adds poll_word = polling_word_off, Rthread or nop.m ; movl gp = method_entry_barrier ;; }
+//  B4  { st8 [t4] = fp ; adds fp = framesize, sp ; mov b7 = gp }
+//  B5  { ld4.acq t3 = [t3] ; nop.x <guard> ;; }
+//  B6  { cmp4.ne p6, p7 = t3, t0 ; nop.i ; (p6) br.call.spnt b0 = b7 ;; }
+//
+// Each group's pair of bundles holds at most two I-unit syllables (movl and
+// nop.x count), so it issues in one cycle (FINDINGS, dispersal). sp moves in
+// the first group, before anything is stored below it; fp is set from the
+// new sp in the group that stores the old one. gp is scratch in generated
+// code. Frames too large for an adds immediate take the separate sequences.
+void BarrierSetAssembler::build_frame_with_entry_barrier(MacroAssembler* masm, int framesize,
+                                                         Register poll_word) {
+  BarrierSetNMethod* bs_nm = BarrierSet::barrier_set()->barrier_set_nmethod();
+  if (bs_nm == nullptr || !ia64::is_simm14(framesize) || !ia64::is_simm14(-framesize)) {
+    __ build_frame_linkage(framesize);
+    if (poll_word->is_valid()) {
+      __ adds(poll_word, in_bytes(JavaThread::polling_word_offset()), Rthread);
+    }
+    nmethod_entry_barrier(masm);
+    return;
+  }
+  Assembler::NoPackScope no_pack(masm);   // fixed shape: BarrierSetNMethod finds the guard
+  int start = __ offset();
+  using namespace ia64;
+  const int disarmed = in_bytes(bs_nm->thread_disarmed_guard_value_offset());
+  const int guard_from_b1 = 5 * BytesPerBundle + 8 - BytesPerBundle;
+  const Insn set_poll = poll_word->is_valid()
+      ? Adds(poll_word->encoding(), in_bytes(JavaThread::polling_word_offset()), Rthread->encoding())
+      : NopM();
+  __ emit_bundle(MakeBundle(tMMI, Adds(t1->encoding(), frame::return_addr_offset * wordSize, sp->encoding()),
+                            Adds(t4->encoding(), frame::link_offset * wordSize, sp->encoding()),
+                            MovFromBr(t2->encoding(), breturn.encoding())));
+  __ emit_bundle(MakeBundle(tMMI_, Adds(t0->encoding(), disarmed, Rthread->encoding()),
+                            Adds(sp->encoding(), -framesize, sp->encoding()),
+                            MovFromIp(t3->encoding())));
+  __ emit_bundle(MakeBundle(tMMI, St8(t1->encoding(), t2->encoding()),
+                            Ld4(t0->encoding(), t0->encoding()),
+                            Adds(t3->encoding(), guard_from_b1, t3->encoding())));
+  __ emit_bundle(MovlBundleWith(set_poll, gp->encoding(), (uint64_t)StubRoutines::method_entry_barrier(), 0, tMLX_));
+  __ emit_bundle(MakeBundle(tMMI, St8(t4->encoding(), fp->encoding()),
+                            Adds(fp->encoding(), framesize, sp->encoding()),
+                            MovToBr(b7.encoding(), gp->encoding())));
+  __ emit_bundle(NopXBundle(Ld4Acq(t3->encoding(), t3->encoding()), tMLX_));
+  __ emit_bundle(MakeBundle(tMIB_, Cmp4Ne(ptmp0.encoding(), ptmp1.encoding(), t3->encoding(), t0->encoding()),
+                            NopI(), BrCall(breturn.encoding(), b7.encoding(), ptmp0.encoding(), kIndSpnt)));
+  assert(__ offset() - start == 7 * BytesPerBundle, "build_frame_with_entry_barrier size is wrong");
+  assert(entry_barrier_guard_from_end == 2 * BytesPerBundle - 8, "guard must stay in B5");
 }
 
 void BarrierSetAssembler::c2i_entry_barrier(MacroAssembler* masm) {

@@ -73,11 +73,19 @@ public:
 
   virtual void barrier_stubs_init() {}
 
-  // Size of the nmethod entry barrier in bytes, and the guard's offset in it
-  // (barrierSetAssembler_ia64.cpp).
+  // Size of the stand-alone nmethod entry barrier in bytes, and the guard's
+  // offset in it (barrierSetAssembler_ia64.cpp). Both barrier shapes end in
+  // the guard bundle and the call bundle, so the guard is always this far
+  // before the frame-complete offset.
   static const int entry_barrier_size = 5 * BytesPerBundle;
   static const int entry_barrier_guard_offset = 3 * BytesPerBundle + 8;
+  static const int entry_barrier_guard_from_end = 2 * BytesPerBundle - 8;
   virtual void nmethod_entry_barrier(MacroAssembler* masm);
+  // A compiled method's frame linkage (MacroAssembler::build_frame_linkage)
+  // and its entry barrier, scheduled together; sets poll_word (C1's
+  // UsePollWordRegister) too when it is valid.
+  void build_frame_with_entry_barrier(MacroAssembler* masm, int framesize,
+                                      Register poll_word = noreg);
   virtual void c2i_entry_barrier(MacroAssembler* masm);
 
 #ifdef COMPILER2

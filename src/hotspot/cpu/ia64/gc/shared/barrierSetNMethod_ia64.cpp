@@ -37,19 +37,20 @@
 
 // The guard is a 4-byte word inside the immediate of a nop.x in the barrier
 // sequence, which ends at the nmethod's frame-complete offset
-// (BarrierSetAssembler::nmethod_entry_barrier). Reading and writing it is a
-// plain acquire load and release store; whatever it holds, the bundle
-// executes the same, so no instruction is ever patched.
+// (BarrierSetAssembler::nmethod_entry_barrier and
+// build_frame_with_entry_barrier). Reading and writing it is a plain acquire
+// load and release store; whatever it holds, the bundle executes the same, so
+// no instruction is ever patched.
 
 static int* guard_addr(nmethod* nm) {
-  address barrier = nm->code_begin() + nm->frame_complete_offset()
-                    - BarrierSetAssembler::entry_barrier_size;
-  address guard = barrier + BarrierSetAssembler::entry_barrier_guard_offset;
-  // The barrier starts with an MLX bundle (no stop) and its guard bundle is
-  // MLX with a stop. Anything emitted between the barrier and frame-complete
-  // would move this window onto code -- and the guard store would corrupt it.
-  assert((barrier[0] & 0x1f) == ia64::tMLX && (guard[-8] & 0x1f) == ia64::tMLX_,
-         "nmethod entry barrier not where frame-complete says: " PTR_FORMAT, p2i(barrier));
+  address end = nm->code_begin() + nm->frame_complete_offset();
+  address guard = end - BarrierSetAssembler::entry_barrier_guard_from_end;
+  // Both barrier shapes end in the guard bundle (MLX with a stop) and the
+  // call bundle (MIB with a stop). Anything emitted between the barrier and
+  // frame-complete would move this window onto code -- and the guard store
+  // would corrupt it.
+  assert((guard[-8] & 0x1f) == ia64::tMLX_ && (end[-BytesPerBundle] & 0x1f) == ia64::tMIB_,
+         "nmethod entry barrier not where frame-complete says: " PTR_FORMAT, p2i(end));
   return (int*)guard;
 }
 

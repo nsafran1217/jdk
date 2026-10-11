@@ -243,16 +243,15 @@ void C1_MacroAssembler::build_frame(int framesize, int bang_size_in_bytes) {
   // Note that we do this before creating a frame.
   generate_stack_overflow_check(bang_size_in_bytes);
 
-  build_frame_linkage(framesize);
-
-  // Before the entry barrier, which must end the prologue: BarrierSetNMethod
+  // The frame, the poll word register (set_poll_word_register) and the
+  // nmethod entry barrier, which must end the prologue: BarrierSetNMethod
   // finds its guard at a fixed distance before the frame-complete offset.
-  // (After it, disarming wrote the guard over the barrier's own code.)
-  set_poll_word_register();
-
-  // Insert nmethod entry barrier into frame.
+  Register poll_word = noreg;
+  if (UsePollWordRegister) {
+    poll_word = Rpoll_word;
+  }
   BarrierSetAssembler* bs = BarrierSet::barrier_set()->barrier_set_assembler();
-  bs->nmethod_entry_barrier(this);
+  bs->build_frame_with_entry_barrier(this, framesize, poll_word);
 }
 
 // fp is the caller's sp throughout compiled code, so removing the frame is
