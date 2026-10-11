@@ -310,7 +310,11 @@ class Assembler : public AbstractAssembler {
   // a branch may read a predicate written by a non-FP instruction, and a branch
   // register, from its own group (1:42).
   //
-  // Anything not described by a Deps -- implicit resources (ar.ccv, ar.unat,
+  // ar.ccv is described as a pseudo-register (BR class, number 65: there are
+  // only 8 branch registers), so a cmpxchg packs with the work around it and
+  // only its RAW on the mov to ar.ccv needs a stop.
+  //
+  // Anything not described by a Deps -- other implicit resources (ar.unat,
   // ar.pfs/CFM, alloc, calls, mf, break), raw bundles, movl -- is a barrier:
   // its stop stays and the group restarts after it. Bundles that code
   // recognisers or patchers inspect by exact encoding (movl, mov to a branch
@@ -334,6 +338,9 @@ class Assembler : public AbstractAssembler {
     Deps& w(PredicateRegister x) { return x.encoding() == 0 ? *this : wr(PR, x.encoding()); }
     Deps& r(BranchRegister x)    { return rd(BR, x.encoding()); }
     Deps& w(BranchRegister x)    { return wr(BR, x.encoding()); }
+    static const int kCcv = 65;
+    Deps& r_ccv()                { return rd(BR, kCcv); }
+    Deps& w_ccv()                { return wr(BR, kCcv); }
     Deps& branch()               { is_branch = true; return *this; }
     Deps& fp_predicate()         { fp_pred = true; return *this; }
     Deps& keep()                 { keep_stop = true; return *this; }
@@ -990,14 +997,16 @@ class Assembler : public AbstractAssembler {
   // compared -- a narrow cmpxchg must be given a comparand zero-extended to
   // the access width, or it can never succeed.
 
-  void mov_to_ar_ccv(Register r2, QP) { emit_m(ia64::MovToArCcv(r2->encoding(), Q)); }
+  void mov_to_ar_ccv(Register r2, QP) { emit_m(ia64::MovToArCcv(r2->encoding(), Q), D().w_ccv().r(r2).r(qp)); }
 
-  void cmpxchg4_acq(Register r1, Register r3, Register r2, QP) { emit_m(ia64::Cmpxchg4Acq(r1->encoding(), r3->encoding(), r2->encoding(), Q)); }
-  void cmpxchg8_acq(Register r1, Register r3, Register r2, QP) { emit_m(ia64::Cmpxchg8Acq(r1->encoding(), r3->encoding(), r2->encoding(), Q)); }
-  void cmpxchg4_rel(Register r1, Register r3, Register r2, QP) { emit_m(ia64::Cmpxchg4Rel(r1->encoding(), r3->encoding(), r2->encoding(), Q)); }
-  void cmpxchg8_rel(Register r1, Register r3, Register r2, QP) { emit_m(ia64::Cmpxchg8Rel(r1->encoding(), r3->encoding(), r2->encoding(), Q)); }
-  void xchg4(Register r1, Register r3, Register r2, QP)        { emit_m(ia64::Xchg4(r1->encoding(), r3->encoding(), r2->encoding(), Q)); }
-  void xchg8(Register r1, Register r3, Register r2, QP)        { emit_m(ia64::Xchg8(r1->encoding(), r3->encoding(), r2->encoding(), Q)); }
+#define IA64_CMPXCHG_DEPS D().w(r1).r(r3).r(r2).r_ccv().r(qp)
+  void cmpxchg4_acq(Register r1, Register r3, Register r2, QP) { emit_m(ia64::Cmpxchg4Acq(r1->encoding(), r3->encoding(), r2->encoding(), Q), IA64_CMPXCHG_DEPS); }
+  void cmpxchg8_acq(Register r1, Register r3, Register r2, QP) { emit_m(ia64::Cmpxchg8Acq(r1->encoding(), r3->encoding(), r2->encoding(), Q), IA64_CMPXCHG_DEPS); }
+  void cmpxchg4_rel(Register r1, Register r3, Register r2, QP) { emit_m(ia64::Cmpxchg4Rel(r1->encoding(), r3->encoding(), r2->encoding(), Q), IA64_CMPXCHG_DEPS); }
+  void cmpxchg8_rel(Register r1, Register r3, Register r2, QP) { emit_m(ia64::Cmpxchg8Rel(r1->encoding(), r3->encoding(), r2->encoding(), Q), IA64_CMPXCHG_DEPS); }
+#undef IA64_CMPXCHG_DEPS
+  void xchg4(Register r1, Register r3, Register r2, QP)        { emit_m(ia64::Xchg4(r1->encoding(), r3->encoding(), r2->encoding(), Q), D().w(r1).r(r3).r(r2).r(qp)); }
+  void xchg8(Register r1, Register r3, Register r2, QP)        { emit_m(ia64::Xchg8(r1->encoding(), r3->encoding(), r2->encoding(), Q), D().w(r1).r(r3).r(r2).r(qp)); }
 
   void mf() { emit_m(ia64::Mf()); }
 
