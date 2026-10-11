@@ -81,12 +81,20 @@ define_pd_global(bool, SuperWordLoopUnrollAnalysis,  false);
 define_pd_global(uint, SuperWordStoreToLoadForwardingFailureDetection, 16);
 define_pd_global(bool, IdealizeClearArrayNode,       true);
 
-// Tiered ergonomics multiply this by five, up to 240M (compilerDefinitions.cpp);
-// with -XX:-TieredCompilation it stays 128M, JDK 6's value.
+// Tiered ergonomics multiply this by five, to 640M (compilerDefinitions.cpp),
+// which also segments the code cache; with -XX:-TieredCompilation it stays
+// 128M, JDK 6's value.
 define_pd_global(intx, ReservedCodeCacheSize,        128*M);
 define_pd_global(intx, NonProfiledCodeHeapSize,      48*M);
 define_pd_global(intx, ProfiledCodeHeapSize,         48*M);
-define_pd_global(intx, NonNMethodCodeHeapSize,       32*M);
+// The non-nmethod heap (stubs, interpreter, adapters) sits between the two
+// nmethod heaps, so its size is the distance from the stubs to the first C2
+// code. An IP-relative br.call reaches +-16M; beyond that a call to a stub
+// goes through a trampoline. The heap holds 3.5M at startup (release) and
+// 4.6M after J6Bench. The compiler buffers are added to this size
+// (CodeCache::initialize_heaps), and blobs go to the non-profiled heap if
+// it fills.
+define_pd_global(intx, NonNMethodCodeHeapSize,       6*M);
 define_pd_global(uintx, CodeCacheMinBlockLength,     6);
 define_pd_global(uintx, CodeCacheMinimumUseSpace,    1600*K);
 
