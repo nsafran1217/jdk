@@ -1037,6 +1037,13 @@ AC_DEFUN_ONCE([JDKOPT_SETUP_FALLBACK_LINKER],
     FALLBACK_LINKER_DEFAULT=true
   fi
 
+  # IA-64 has no native linker in any JVM variant (there is no ABI
+  # implementation for it), so java.lang.foreign, and the JDK code built on
+  # it such as font shaping, needs the fallback linker there.
+  if test "x$OPENJDK_TARGET_CPU" = "xia64"; then
+    FALLBACK_LINKER_DEFAULT=true
+  fi
+
   UTIL_ARG_ENABLE(NAME: fallback-linker, DEFAULT: $FALLBACK_LINKER_DEFAULT,
       RESULT: ENABLE_FALLBACK_LINKER,
       DESC: [enable libffi-based fallback implementation of java.lang.foreign.Linker],
