@@ -209,7 +209,7 @@ address MacroAssembler::trampoline_call(address entry, const RelocationHolder& r
          rspec.type() == relocInfo::static_call_type ||
          rspec.type() == relocInfo::virtual_call_type, "wrong reloc type");
   assert(entry != nullptr, "trampoline_call to null");
-  address call_pc = pc();                 // closes the open bundle
+  pc();                                   // closes the open bundle
   int call_offset = offset();
   int32_t disp;
   if (far_branches()) {
@@ -226,10 +226,14 @@ address MacroAssembler::trampoline_call(address entry, const RelocationHolder& r
     // The whole code cache is within reach, and the code is generated in it
     // (CallRelocation::fix_relocation_after_move redoes the displacement
     // when it is copied).
-    assert(NativeCall::reachable_from_branch_at(call_pc, entry), "out of range");
-    disp = (int32_t)((entry - call_pc) / (intptr_t)BytesPerBundle);
+    address branch = pc();
+    assert(NativeCall::reachable_from_branch_at(branch, entry), "out of range");
+    disp = (int32_t)((entry - branch) / (intptr_t)BytesPerBundle);
   }
-  assert(pc() == call_pc, "the call must start where it was recorded");
+  // Taken only now: emitting the trampoline may have expanded the code
+  // buffer and moved the instructions.
+  address call_pc = pc();
+  assert(offset() == call_offset, "the call must start where it was recorded");
   relocate(rspec);
   br_call_rel(disp);
   return call_pc;
