@@ -171,6 +171,10 @@ define_pd_global(intx, InlineSmallCode, 7500);
                                                                                  \
   product(bool, UseAddlConstants, true, DIAGNOSTIC,                              \
           "Load constants of up to 22 bits with addl (one slot) instead of "     \
-          "movl (a whole bundle)")
+          "movl (a whole bundle)")                                               \
+                                                                                 \
+  product(bool, UseIntDivSequence, true, DIAGNOSTIC,                             \
+          "Divide ints with GCC's 32-bit sequence (three FMA levels after "      \
+          "frcpa) instead of the 64-bit one")
 
 #endif // CPU_IA64_GLOBALS_IA64_HPP

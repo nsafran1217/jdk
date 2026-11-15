@@ -1207,6 +1207,8 @@ class Assembler : public AbstractAssembler {
   void getf_exp(Register r1, FloatRegister f2, QP) { emit_m(ia64::GetfExp(r1->encoding(), f2->encoding(), Q), D().w(r1).r(f2).r(qp)); }
   void getf_sig(Register r1, FloatRegister f2, QP) { emit_m(ia64::GetfSig(r1->encoding(), f2->encoding(), Q), D().w(r1).r(f2).r(qp)); }
   void setf_sig(FloatRegister f1, Register r2, QP) { emit_m(ia64::SetfSig(f1->encoding(), r2->encoding(), Q), D().w(f1).r(r2).r(qp)); }
+  // setf.exp: r2{16:0} becomes the exponent, r2{17} the sign, significand 1.0.
+  void setf_exp(FloatRegister f1, Register r2, QP) { emit_m(ia64::SetfExp(f1->encoding(), r2->encoding(), Q), D().w(f1).r(r2).r(qp)); }
 
   // Integer multiply goes through the FP significand path: the integer units
   // have no multiplier.

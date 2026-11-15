@@ -84,7 +84,7 @@ void LIR_Assembler::arithmetic_idiv(LIR_Code code, LIR_Opr left, LIR_Opr right, 
     div_rem_by_power_of_2(_masm, dreg, lreg, c, is_irem);
   } else {
     Register rreg = int_operand(right->as_register());
-    __ java_div_rem(dreg, lreg, rreg, is_irem);
+    __ java_div_rem_int(dreg, lreg, rreg, is_irem);
     // MIN_VALUE / -1 is 2^31 here; as an int it is MIN_VALUE again.
     int_result(dreg);
   }

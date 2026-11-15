@@ -3115,8 +3115,8 @@ instruct mulL(iRegL dst, iRegL src1, iRegL src2)
   ins_pipe(pipe_mul);
 %}
 
-// Divide and remainder: java_div_rem, GCC's divide sequence through the FP
-// unit (f2-f6, p6, t1). The divisor is non-zero: C2 tests it beforehand.
+// Divide and remainder: java_div_rem(_int), GCC's divide sequences through
+// the FP unit (f2-f7, p6, t1). The divisor is non-zero: C2 tests it beforehand.
 // Int operands are sign-extended into t2/t3 first (lazy ints).
 instruct divI(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
 %{
@@ -3128,7 +3128,7 @@ instruct divI(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
   ins_encode %{
     __ sxt4(t2, $src1$$Register);
     __ sxt4(t3, $src2$$Register);
-    __ java_div_rem($dst$$Register, t2, t3, false);
+    __ java_div_rem_int($dst$$Register, t2, t3, false);
   %}
 
   ins_pipe(pipe_div);
@@ -3144,7 +3144,7 @@ instruct modI(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
   ins_encode %{
     __ sxt4(t2, $src1$$Register);
     __ sxt4(t3, $src2$$Register);
-    __ java_div_rem($dst$$Register, t2, t3, true);
+    __ java_div_rem_int($dst$$Register, t2, t3, true);
   %}
 
   ins_pipe(pipe_div);
@@ -3192,7 +3192,7 @@ instruct UdivI(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
   ins_encode %{
     __ zxt4(t2, $src1$$Register);
     __ zxt4(t3, $src2$$Register);
-    __ java_div_rem($dst$$Register, t2, t3, false);
+    __ java_div_rem_int($dst$$Register, t2, t3, false);
   %}
 
   ins_pipe(pipe_div);
@@ -3208,7 +3208,7 @@ instruct UmodI(iRegI dst, iRegIorL2I src1, iRegIorL2I src2)
   ins_encode %{
     __ zxt4(t2, $src1$$Register);
     __ zxt4(t3, $src2$$Register);
-    __ java_div_rem($dst$$Register, t2, t3, true);
+    __ java_div_rem_int($dst$$Register, t2, t3, true);
   %}
 
   ins_pipe(pipe_div);

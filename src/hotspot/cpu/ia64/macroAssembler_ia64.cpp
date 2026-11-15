@@ -1152,6 +1152,47 @@ void MacroAssembler::java_div_rem(Register dst, Register a, Register b, bool wan
   sub(dst, a, t1);
 }
 
+// The same for operands of at most 32 significant bits: ints sign-extended,
+// or unsigned ints zero-extended (|a|, |b| <= 2^32). GCC's divsi3_internal
+// (div.md, also its udivsi3): three dependent FMA levels after frcpa instead
+// of the 64-bit sequence's six, ~8 cycles less latency. Exact for such
+// magnitudes (Intel's proof as cited in div.md; tools/gate/intdivprobe checks
+// the emitted sequence against C on rx2800). Java's overflow, MIN_VALUE / -1,
+// gives 2^31 as in java_div_rem, MIN_VALUE as an int. Clobbers f2-f7, ptmp0
+// and t1.
+void MacroAssembler::java_div_rem_int(Register dst, Register a, Register b, bool want_rem) {
+  if (!UseIntDivSequence) {
+    java_div_rem(dst, a, b, want_rem);
+    return;
+  }
+  const FloatRegister fa = f2, fb = f3, y = f4, e = f5, q = f6, c = f7;
+  const PredicateRegister p = ptmp0;
+  assert_different_registers(a, t1);
+  assert_different_registers(b, t1);
+  setf_sig(fa, a);
+  setf_sig(fb, b);
+  mov_immediate(t1, 0xffdd);               // 2^-34: exponent 0xffdd, bias 0xffff
+  setf_exp(c, t1);
+  fcvt_xf(fa, fa);
+  fcvt_xf(fb, fb);
+  frcpa(y, p, fa, fb);                     // y  = 1 / b, approximately
+  fma (q, fa, y,  f0, ia64::sf1, p);       // q  = a * y
+  fnma(e, fb, y,  f1, ia64::sf1, p);       // e  = 1 - (b * y)
+  fma (q, e,  q,  q,  ia64::sf1, p);       // q1 = q + (e * q)
+  fma (e, e,  e,  c,  ia64::sf1, p);       // e1 = (e * e) + 2^-34
+  fma (y, e,  q,  q,  ia64::sf1, p);       // q2 = q1 + (e1 * q1), else y
+  fcvt_fx_trunc(y, y, ia64::sf1);
+  if (!want_rem) {
+    getf_sig(dst, y);
+    return;
+  }
+  // a - q * b, as in java_div_rem.
+  setf_sig(fb, b);
+  xma_l(fb, y, fb, f0);
+  getf_sig(t1, fb);
+  sub(dst, a, t1);
+}
+
 void MacroAssembler::java_udiv_rem(Register dst, Register a, Register b, bool want_rem) {
   const FloatRegister fa = f2, fb = f3, y = f4, e = f5, yn = f6;
   const PredicateRegister p = ptmp0;
