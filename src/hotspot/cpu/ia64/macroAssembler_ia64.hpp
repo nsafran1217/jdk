@@ -100,9 +100,13 @@ class MacroAssembler : public Assembler {
   void movptr(Register dst, address addr)   { movl(dst, (uint64_t)(uintptr_t)addr); }
   void movptr(Register dst, uintptr_t imm)  { movl(dst, (uint64_t)imm); }
 
+  // The cheapest form: adds (14 bits) or addl (22 bits) take one A slot and
+  // pack; movl takes a whole MLX bundle with its own stop.
   void mov_immediate(Register dst, int64_t imm) {
     if (ia64::is_simm14(imm)) {
       adds(dst, imm, zr);          // r0 reads as 0
+    } else if (ia64::is_simm22(imm) && UseAddlConstants) {
+      addl(dst, imm, zr);
     } else {
       movl(dst, (uint64_t)imm);
     }

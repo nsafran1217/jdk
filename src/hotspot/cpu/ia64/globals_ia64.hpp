@@ -167,6 +167,10 @@ define_pd_global(intx, InlineSmallCode, 7500);
   product(bool, UseC2SplitOffsetLoads, true, DIAGNOSTIC,                         \
           "Split C2 integer loads at base + offset into the address adds "     \
           "and the access after register allocation, so the scheduler can "    \
-          "overlap the adds with other nodes (a peephole in ia64.ad)")
+          "overlap the adds with other nodes (a peephole in ia64.ad)")           \
+                                                                                 \
+  product(bool, UseAddlConstants, true, DIAGNOSTIC,                              \
+          "Load constants of up to 22 bits with addl (one slot) instead of "     \
+          "movl (a whole bundle)")
 
 #endif // CPU_IA64_GLOBALS_IA64_HPP

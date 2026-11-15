@@ -231,6 +231,19 @@ inline Insn Adds(uint32_t r1, int64_t imm14, uint32_t r3, uint32_t qp = 0) {
 
 inline Insn MovReg(uint32_t r1, uint32_t r3, uint32_t qp = 0) { return Adds(r1, 0, r3, qp); }
 
+// A5: r1 = imm22 + r3 ("addl"), r3 one of r0-r3 (a 2-bit field). With r0 it
+// loads any constant in [-2^21, 2^21) in one A slot instead of a movl bundle.
+//   s 36   imm9d 35:27   imm5c 26:22   r3 21:20   imm7b 19:13   r1 12:6
+inline bool is_simm22(int64_t v) { return -(int64_t(1) << 21) <= v && v < (int64_t(1) << 21); }
+inline Insn Addl(uint32_t r1, int64_t imm22, uint32_t r3, uint32_t qp = 0) {
+  assert(is_simm22(imm22), "addl immediate out of range");
+  assert(r3 <= 3, "addl takes r0-r3 only");
+  uint64_t u = uint64_t(imm22);
+  return fOp(9) | (Insn((u >> 21) & 0x1) << 36) | (Insn((u >> 7) & 0x1ff) << 27) |
+         (Insn((u >> 16) & 0x1f) << 22) | (Insn(r3 & 0x3) << 20) |
+         (Insn(u & 0x7f) << 13) | fR1(r1) | fQp(qp);
+}
+
 // ---------------------------------------------------------------------------
 // A6: compare two registers and write a pair of predicates.
 //   cmp.rel p1, p2 = r2, r3

@@ -763,6 +763,7 @@ class Assembler : public AbstractAssembler {
   }
   static const int kStoreSlot = 64;
 
+
   void emit_unit(Unit u, ia64::Insn insn, const Deps& d0) {
     Deps d = d0;
     if (_pack_depth > 0 && UseBundleScheduling && is_store(u, insn) && d.nwr < 3) {
@@ -921,6 +922,10 @@ class Assembler : public AbstractAssembler {
     emit_a(ia64::Adds(r1->encoding(), imm14, r3->encoding(), Q), D().w(r1).r(r3).r(qp));
   }
   void mov(Register r1, Register r3, QP) { emit_a(ia64::MovReg(r1->encoding(), r3->encoding(), Q), D().w(r1).r(r3).r(qp)); }
+  // addl: a 22-bit signed constant plus r0-r3 (with r0, a one-slot constant load).
+  void addl(Register r1, int64_t imm22, Register r3, QP) {
+    emit_a(ia64::Addl(r1->encoding(), imm22, r3->encoding(), Q), D().w(r1).r(r3).r(qp));
+  }
 
   // ---- compare (A unit) --------------------------------------------------
   //
