@@ -108,7 +108,7 @@ class MacroAssembler : public Assembler {
     } else if (ia64::is_simm22(imm) && UseAddlConstants) {
       addl(dst, imm, zr);
     } else {
-      movl(dst, (uint64_t)imm);
+      movl_const(dst, (uint64_t)imm);
     }
   }
   void mov(Register dst, int64_t imm) { mov_immediate(dst, imm); }

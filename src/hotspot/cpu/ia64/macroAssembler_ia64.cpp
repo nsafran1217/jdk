@@ -57,7 +57,7 @@ void MacroAssembler::add_imm(Register dst, Register src, int64_t imm, Register t
     if (imm != 0 || dst != src) adds(dst, imm, src);
   } else {
     assert_different_registers(src, tmp);
-    movl(tmp, (uint64_t)imm);
+    movl_const(tmp, (uint64_t)imm);
     add(dst, tmp, src);
   }
 }
@@ -120,7 +120,7 @@ void MacroAssembler::lea(Register dst, const Address& adr) {
         // movl into dst would destroy base if they are the same register.
         Register tmp = (dst == base) ? t0 : dst;
         assert(tmp != base, "lea: no scratch left (base and dst are both t0)");
-        movl(tmp, (uint64_t)off);
+        movl_const(tmp, (uint64_t)off);
         add(dst, tmp, base);
       }
       break;
@@ -772,7 +772,7 @@ void MacroAssembler::decode_klass_not_null(Register r) {
   }
   if (CompressedKlassPointers::base() != nullptr) {
     assert(r != t0, "decode_klass_not_null clobbers t0");
-    movl(t0, (address)CompressedKlassPointers::base());
+    movl_const(t0, (uint64_t)(uintptr_t)CompressedKlassPointers::base());
     add(r, r, t0);
   }
 }
@@ -790,7 +790,7 @@ void MacroAssembler::encode_klass_not_null(Register dst, Register src) {
   assert(UseCompressedClassPointers, "should only be used for compressed headers");
   if (CompressedKlassPointers::base() != nullptr) {
     assert_different_registers(src, t1);
-    movl(t1, (address)CompressedKlassPointers::base());
+    movl_const(t1, (uint64_t)(uintptr_t)CompressedKlassPointers::base());
     sub(dst, src, t1);
   } else {
     mov(dst, src);
@@ -1093,7 +1093,7 @@ void MacroAssembler::fsqrt_d(FloatRegister dst, FloatRegister b) {
   const FloatRegister y = f2, g = f3, h = f4, r = f5, c = f6;
   assert_different_registers(b, y, g, h, r, c);
   const PredicateRegister p = ptmp0;
-  movl(t1, (uint64_t)0x3FE0000000000000ULL);   // 0.5
+  movl_const(t1, (uint64_t)0x3FE0000000000000ULL);   // 0.5
   setf_d(c, t1);
   frsqrta(y, p, b);                        // y  = 1 / sqrt(b), approximately
   fma (g, b, y, f0, ia64::sf1, p);         // g  = b * y
@@ -1234,7 +1234,7 @@ void MacroAssembler::java_fp_to_long(Register dst, FloatRegister src) {
   fcvt_fx_trunc(f6, src, ia64::sf0);
   getf_sig(dst, f6);
   fcmp_lt(p8, p9, f0, src);                // src > 0 (false for NaN)
-  movl(t1, (uint64_t)min_jlong);
+  movl_const(t1, (uint64_t)min_jlong);
   cmp_eq(p8, p9, dst, t1, p8);             // ... and it overflowed
   adds(dst, -1, dst, p8);                  // MIN_VALUE - 1 == MAX_VALUE
   fcmp_unord(p6, p7, src, src);

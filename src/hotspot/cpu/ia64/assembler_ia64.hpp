@@ -424,7 +424,8 @@ class Assembler : public AbstractAssembler {
   // patch sites and every shape a NativeInstruction recognises are unchanged
   // -- except that br_cond to a label may take slot 2 of the open bundle
   // (UseBranchPacking), its patch site then being that bundle.
-  enum Unit : uint8_t { U_M, U_I, U_A, U_F };
+  // U_L: a movl in the scheduling window (movl_const), packed as an MLX bundle.
+  enum Unit : uint8_t { U_M, U_I, U_A, U_F, U_L };
 
   void emit_m(ia64::Insn i, const Deps& d) { emit_unit(U_M, i, d); }
   void emit_i(ia64::Insn i, const Deps& d) { emit_unit(U_I, i, d); }
@@ -543,6 +544,7 @@ class Assembler : public AbstractAssembler {
       case U_I: return slot == 'I';
       case U_A: return slot == 'M' || slot == 'I';
       case U_F: return slot == 'F';
+      case U_L: return false;
     }
     return false;
   }
@@ -690,7 +692,8 @@ class Assembler : public AbstractAssembler {
   // missing dependencies (a wrong result instead of a slow one).
   static const int kSchedWindow = 48;
   static const int kSchedWindowNode = 24;
-  struct WinInsn { ia64::Insn insn; Unit u; Deps d; bool ordered; };
+  // U_L: insn holds r1 (bits 6:0) and qp (12:7), imm the 64-bit constant.
+  struct WinInsn { ia64::Insn insn; uint64_t imm; Unit u; Deps d; bool ordered; };
   WinInsn _win[kSchedWindow];
   int     _win_n = 0;
   uint64_t _sched_rand = 0;
@@ -714,7 +717,7 @@ class Assembler : public AbstractAssembler {
                 }
                 break;
       case U_F: if (op <= 1) return true; break;          // F misc (fsetc, fclrf, frcpa, ...)
-      case U_A: break;
+      case U_A: case U_L: break;
     }
     for (int i = 0; i < d.nwr; i++) {
       if (d.wr_cls[i] == Deps::GR && (d.wr_num[i] == 12 || d.wr_num[i] == 4)) return true;  // sp, fp
@@ -760,7 +763,7 @@ class Assembler : public AbstractAssembler {
   //    the clock moves to the next cycle in which something is ready.
   // The packer then lays the order out as before; its stops follow
   // register conflicts, which the latencies keep in separate cycles.
-  enum SchedKind : uint8_t { SK_A, SK_I, SK_M, SK_LD, SK_LDF, SK_ST, SK_GETF, SK_SETF, SK_F, SK_SYS };
+  enum SchedKind : uint8_t { SK_A, SK_I, SK_M, SK_LD, SK_LDF, SK_ST, SK_GETF, SK_SETF, SK_F, SK_SYS, SK_L };
   struct SchedOp {
     SchedKind k;
     bool mem;                 // a load or store (memory ordering)
@@ -780,6 +783,7 @@ class Assembler : public AbstractAssembler {
     const int op = (int)((insn >> 37) & 0xf);
     switch (u) {
       case U_A: s.k = SK_A; break;
+      case U_L: s.k = SK_L; break;
       case U_F:
         s.k = SK_F;
         // F misc with xb = 0, x6 < 0x10: break.f, nop.f, fsetc, fclrf, fchkf.
@@ -917,6 +921,7 @@ class Assembler : public AbstractAssembler {
       case SK_LD: case SK_LDF: q.ld++; break;
       case SK_ST: case SK_SETF: q.st++; break;
       case SK_GETF: q.getf++; break;
+      case SK_L: q.i++; q.n++; break;            // L+X: an I port, two syllables
       default:
         switch (u) {
           case U_M: q.mgen++; break;
@@ -939,6 +944,7 @@ class Assembler : public AbstractAssembler {
       case SK_LD: case SK_LDF: p.ld++; break;
       case SK_ST: case SK_SETF: p.st++; break;
       case SK_GETF: p.getf++; break;
+      case SK_L: p.i++; p.n++; break;
       default:
         switch (u) {
           case U_M: p.mgen++; break;
@@ -1044,7 +1050,7 @@ class Assembler : public AbstractAssembler {
     }
     for (int k = 0; k < n; k++) {
       const WinInsn& w = _win[order[k]];
-      pack_unit(w.u, w.insn, w.d);
+      pack_win(w);
     }
   }
 
@@ -1107,7 +1113,7 @@ class Assembler : public AbstractAssembler {
     }
     for (int k = 0; k < n; k++) {
       const WinInsn& w = _win[order[k]];
-      pack_unit(w.u, w.insn, w.d);
+      pack_win(w);
     }
   }
 
@@ -1211,6 +1217,49 @@ class Assembler : public AbstractAssembler {
     write_open_bundle(tmpl, pos);
     _last_sect = _ob_sect;
     _last_off  = _ob_off;
+  }
+
+  void pack_win(const WinInsn& w) {
+    if (w.u == U_L) {
+      pack_movl(w);
+    } else {
+      pack_unit(w.u, w.insn, w.d);
+    }
+  }
+
+  // A movl from the window: into the open bundle as MLX if that holds just
+  // one M or A instruction, independent of it; otherwise an MLX bundle of
+  // its own. Either way its group may continue into the next bundle (stop
+  // elision): nothing recognises or patches these.
+  void pack_movl(const WinInsn& w) {
+    const uint32_t r1 = (uint32_t)(w.insn & 0x7f), qp = (uint32_t)((w.insn >> 7) & 0x3f);
+    const Deps& d = w.d;
+    const bool conflict = conflicts(d);
+    if (_pack_depth > 0 && !conflict && _ob_open && _ob_n == 1 &&
+        (_ob_unit[0] == U_M || _ob_unit[0] == U_A) &&
+        _ob_sect == code_section() && _ob_off == raw_offset() - BytesPerBundle) {
+      ia64::Bundle b = ia64::MovlBundleWith(_ob_insn[0], r1, w.imm, qp, ia64::tMLX_);
+      address p = _ob_sect->start() + _ob_off;
+      *(uint64_t*)p = b.lo;
+      *(uint64_t*)(p + 8) = b.hi;
+      _ob_open = false;
+      add_pending(d);
+      return;                           // _last_off already names this bundle
+    }
+    finalize_open_bundle();
+    _ob_open = false;
+    if (!conflict && UseStopElision &&
+        _last_sect == code_section() && _last_off == raw_offset() - BytesPerBundle) {
+      address prev = code_section()->start() + _last_off;
+      assert((*prev & 1) == 1, "previous bundle must still end in a stop");
+      *prev &= ~1;
+    } else {
+      clear_pending();
+    }
+    add_pending(d);
+    emit_raw_bundle(ia64::MovlBundle(r1, w.imm, qp));
+    _last_sect = code_section();
+    _last_off  = raw_offset() - BytesPerBundle;
   }
 
  public:
@@ -1492,6 +1541,20 @@ class Assembler : public AbstractAssembler {
   // only +/-16 MiB, so every absolute address is materialised here.
   void movl(Register r1, uint64_t imm, QP) { Deps d = D().w(r1).r(qp).keep(); emit_bundle(ia64::MovlBundle(r1->encoding(), imm, Q), &d); }
   void movl(Register r1, address a, QP)    { movl(r1, (uint64_t)(uintptr_t)a, qp); }
+  // A constant nothing relocates, recognises or patches: in C2 emission
+  // under UseC2CrossNodeScheduling it is scheduled with the instructions
+  // around it (pack_movl) instead of ending the window.
+  void movl_const(Register r1, uint64_t imm, QP) {
+    if (_pack_depth > 0 && UseBundleScheduling && defers_instructions() &&
+        code_section()->locs_point() != code_section()->end()) {
+      if (_win_n >= win_limit()) flush_window();
+      WinInsn& w = _win[_win_n++];
+      w.insn = (ia64::Insn)r1->encoding() | ((ia64::Insn)Q << 7);
+      w.imm = imm; w.u = U_L; w.d = D().w(r1).r(qp); w.ordered = false;
+      return;
+    }
+    movl(r1, imm, qp);
+  }
 
   // Load the address of a label, position-independently:
   //     mov  r1 = ip              // the address of this bundle, B
