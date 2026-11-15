@@ -62,6 +62,10 @@
 
   // Branch to L if (a <cmpcode> b), comparing as kind. Clobbers p6/p7.
   void cmp_branch(int cmpcode, CmpKind kind, Register a, Register b, Label& L);
+  // pt = ((a & (1 << bit)) == 0) for eq, != 0 for ne; pf its complement.
+  void tbit_preds(int cmpcode, Register a, int bit, PredicateRegister pt, PredicateRegister pf);
+  // Branch on (a & (1 << bit)) == 0 (eq) or != 0 (ne): one tbit.
+  void tbit_branch(int cmpcode, Register a, int bit, Label& L);
   // Floating point: unordered counts as less, as everywhere in C2 (lt, le and
   // ne are taken for a NaN operand; gt, ge and eq are not).
   void float_cmp_branch(int cmpcode, FloatRegister a, FloatRegister b, Label& L);

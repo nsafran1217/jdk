@@ -183,6 +183,10 @@ define_pd_global(intx, InlineSmallCode, 7500);
                                                                                  \
   product(bool, UseGetfStoreRule, true, DIAGNOSTIC,                              \
           "The packer never puts a store after a getf in one instruction "       \
-          "group (it would hold the next group ~5 cycles)")
+          "group (it would hold the next group ~5 cycles)")                      \
+                                                                                 \
+  product(bool, UseTbitBranches, true, DIAGNOSTIC,                               \
+          "C2 branches and selects on a single-bit test (x & 2^n ==/!= 0) "      \
+          "with tbit")
 
 #endif // CPU_IA64_GLOBALS_IA64_HPP

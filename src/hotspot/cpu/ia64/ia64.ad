@@ -1944,6 +1944,27 @@ operand immI_0_63()
 %}
 
 
+// A single-bit mask (for tbit): one bit set, bit 31 included.
+operand immI_pow2()
+%{
+  predicate(is_power_of_2((juint)n->get_int()));
+  match(ConI);
+
+  op_cost(0);
+  format %{ %}
+  interface(CONST_INTER);
+%}
+
+operand immL_pow2()
+%{
+  predicate(is_power_of_2((julong)n->get_long()));
+  match(ConL);
+
+  op_cost(0);
+  format %{ %}
+  interface(CONST_INTER);
+%}
+
 // Shift amounts for shladd (1-4)
 operand immI_1_4()
 %{
@@ -5509,6 +5530,43 @@ instruct cmpI_zero_branch(cmpOp cmp, iRegIorL2I op1, immI0 zero, label lbl)
   ins_pipe(pipe_cmp_branch);
 %}
 
+// One-bit tests, (x & 2^n) ==/!= 0, as tbit: no mask constant and no and,
+// one instruction group less on the way to the branch. For an int the bit
+// is below 32, so the lazy upper half does not matter.
+instruct tbitI_branch(cmpOpEqNe cmp, iRegIorL2I op1, immI_pow2 mask, immI0 zero, label lbl)
+%{
+  predicate(UseTbitBranches);
+  match(If cmp (CmpI (AndI op1 mask) zero));
+
+  effect(USE lbl);
+
+  ins_cost(BRANCH_COST);
+  format %{ "tbit.$cmp  $op1, log2($mask) ; br $lbl\t# @tbitI_branch" %}
+
+  ins_encode %{
+    __ tbit_branch($cmp$$cmpcode, $op1$$Register, exact_log2((juint)$mask$$constant), *($lbl$$label));
+  %}
+
+  ins_pipe(pipe_cmp_branch);
+%}
+
+instruct tbitL_branch(cmpOpEqNe cmp, iRegL op1, immL_pow2 mask, immL0 zero, label lbl)
+%{
+  predicate(UseTbitBranches);
+  match(If cmp (CmpL (AndL op1 mask) zero));
+
+  effect(USE lbl);
+
+  ins_cost(BRANCH_COST);
+  format %{ "tbit.$cmp  $op1, log2($mask) ; br $lbl\t# @tbitL_branch" %}
+
+  ins_encode %{
+    __ tbit_branch($cmp$$cmpcode, $op1$$Register, exact_log2((julong)$mask$$constant), *($lbl$$label));
+  %}
+
+  ins_pipe(pipe_cmp_branch);
+%}
+
 instruct cmpI_loop(cmpOp cmp, iRegIorL2I op1, iRegIorL2I op2, label lbl)
 %{
   match(CountedLoopEnd cmp (CmpI op1 op2));
@@ -5854,6 +5912,74 @@ instruct cmovI_cmpI(iRegI dst, iRegIorL2I src, iRegIorL2I op1, iRegIorL2I op2, c
 
   ins_encode %{
     __ cmp_preds($cop$$cmpcode, C2_MacroAssembler::cmp_int, $op1$$Register, $op2$$Register, ptmp0, ptmp1);
+    __ mov($dst$$Register, $src$$Register, ptmp0);
+  %}
+
+  ins_pipe(ialu_reg_reg_2);
+%}
+
+// A select on a one-bit test: tbit instead of mask, and, compare.
+instruct cmovI_tbitI(iRegI dst, iRegIorL2I src, iRegIorL2I op1, immI_pow2 mask, immI0 zero, cmpOpEqNe cop)
+%{
+  predicate(UseTbitBranches);
+  match(Set dst (CMoveI (Binary cop (CmpI (AndI op1 mask) zero)) (Binary dst src)));
+
+  ins_cost(ALU_COST * 2);
+  format %{ "tbit.$cop  $op1, log2($mask) ; (p6) mov $dst, $src\t# @cmovI_tbitI" %}
+
+  ins_encode %{
+    __ tbit_preds($cop$$cmpcode, $op1$$Register, exact_log2((juint)$mask$$constant), ptmp0, ptmp1);
+    __ mov($dst$$Register, $src$$Register, ptmp0);
+  %}
+
+  ins_pipe(ialu_reg_reg_2);
+%}
+
+// A select on a one-bit test: tbit instead of mask, and, compare.
+instruct cmovI_tbitL(iRegI dst, iRegIorL2I src, iRegL op1, immL_pow2 mask, immL0 zero, cmpOpEqNe cop)
+%{
+  predicate(UseTbitBranches);
+  match(Set dst (CMoveI (Binary cop (CmpL (AndL op1 mask) zero)) (Binary dst src)));
+
+  ins_cost(ALU_COST * 2);
+  format %{ "tbit.$cop  $op1, log2($mask) ; (p6) mov $dst, $src\t# @cmovI_tbitL" %}
+
+  ins_encode %{
+    __ tbit_preds($cop$$cmpcode, $op1$$Register, exact_log2((julong)$mask$$constant), ptmp0, ptmp1);
+    __ mov($dst$$Register, $src$$Register, ptmp0);
+  %}
+
+  ins_pipe(ialu_reg_reg_2);
+%}
+
+// A select on a one-bit test: tbit instead of mask, and, compare.
+instruct cmovL_tbitI(iRegL dst, iRegL src, iRegIorL2I op1, immI_pow2 mask, immI0 zero, cmpOpEqNe cop)
+%{
+  predicate(UseTbitBranches);
+  match(Set dst (CMoveL (Binary cop (CmpI (AndI op1 mask) zero)) (Binary dst src)));
+
+  ins_cost(ALU_COST * 2);
+  format %{ "tbit.$cop  $op1, log2($mask) ; (p6) mov $dst, $src\t# @cmovL_tbitI" %}
+
+  ins_encode %{
+    __ tbit_preds($cop$$cmpcode, $op1$$Register, exact_log2((juint)$mask$$constant), ptmp0, ptmp1);
+    __ mov($dst$$Register, $src$$Register, ptmp0);
+  %}
+
+  ins_pipe(ialu_reg_reg_2);
+%}
+
+// A select on a one-bit test: tbit instead of mask, and, compare.
+instruct cmovL_tbitL(iRegL dst, iRegL src, iRegL op1, immL_pow2 mask, immL0 zero, cmpOpEqNe cop)
+%{
+  predicate(UseTbitBranches);
+  match(Set dst (CMoveL (Binary cop (CmpL (AndL op1 mask) zero)) (Binary dst src)));
+
+  ins_cost(ALU_COST * 2);
+  format %{ "tbit.$cop  $op1, log2($mask) ; (p6) mov $dst, $src\t# @cmovL_tbitL" %}
+
+  ins_encode %{
+    __ tbit_preds($cop$$cmpcode, $op1$$Register, exact_log2((julong)$mask$$constant), ptmp0, ptmp1);
     __ mov($dst$$Register, $src$$Register, ptmp0);
   %}
 

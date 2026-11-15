@@ -172,6 +172,21 @@ void C2_MacroAssembler::float_cmp_preds(int cmpcode, FloatRegister a, FloatRegis
   }
 }
 
+void C2_MacroAssembler::tbit_preds(int cmpcode, Register a, int bit, PredicateRegister pt, PredicateRegister pf) {
+  assert(0 <= bit && bit <= 63, "bit");
+  if (cmpcode == BoolTest::eq) {
+    tbit_z(pt, pf, a, bit);
+  } else {
+    assert(cmpcode == BoolTest::ne, "eq or ne only");
+    tbit_nz(pt, pf, a, bit);
+  }
+}
+
+void C2_MacroAssembler::tbit_branch(int cmpcode, Register a, int bit, Label& L) {
+  tbit_preds(cmpcode, a, bit, ptmp0, ptmp1);
+  br_cond(L, ptmp0);
+}
+
 void C2_MacroAssembler::float_cmp_branch(int cmpcode, FloatRegister a, FloatRegister b, Label& L) {
   float_cmp_preds(cmpcode, a, b, ptmp0, ptmp1);
   br_cond(L, ptmp0);
