@@ -189,7 +189,7 @@ define_pd_global(intx, InlineSmallCode, 7500);
           "C2 branches and selects on a single-bit test (x & 2^n ==/!= 0) "      \
           "with tbit")                                                           \
                                                                                  \
-  product(bool, UseC2ProbBranchHints, true, DIAGNOSTIC,                          \
+  product(bool, UseC2ProbBranchHints, false, DIAGNOSTIC,                         \
           "C2's conditional branches take their whether-hint from the "          \
           "branch probability (.dptk if likely taken), not the direction")
 
