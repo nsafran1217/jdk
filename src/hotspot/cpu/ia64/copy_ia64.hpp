@@ -39,8 +39,13 @@
 // on unaligned access -- there is no hardware fixup -- so the usual trick of
 // copying by machine word regardless is not merely slow here, it faults.
 
+// memmove with software prefetch for large copies (os_linux_ia64.cpp).
+public:
+static void ia64_conjoint_bytes_prefetch(const void* from, void* to, size_t count);
+private:
+
 static void pd_conjoint_words(const HeapWord* from, HeapWord* to, size_t count) {
-  memmove(to, from, count * HeapWordSize);
+  ia64_conjoint_bytes_prefetch(from, to, count * HeapWordSize);
 }
 
 static void pd_disjoint_words(const HeapWord* from, HeapWord* to, size_t count) {
@@ -55,7 +60,7 @@ static void pd_disjoint_words(const HeapWord* from, HeapWord* to, size_t count) 
   case 1:  to[0] = from[0];
   case 0:  break;
   default:
-    memcpy(to, from, count * HeapWordSize);
+    ia64_conjoint_bytes_prefetch(from, to, count * HeapWordSize);
     break;
   }
 }
@@ -69,7 +74,7 @@ static void pd_disjoint_words_atomic(const HeapWord* from,
 static void pd_aligned_conjoint_words(const HeapWord* from,
                                       HeapWord* to,
                                       size_t count) {
-  memmove(to, from, count * HeapWordSize);
+  ia64_conjoint_bytes_prefetch(from, to, count * HeapWordSize);
 }
 
 static void pd_aligned_disjoint_words(const HeapWord* from,
@@ -79,11 +84,11 @@ static void pd_aligned_disjoint_words(const HeapWord* from,
 }
 
 static void pd_conjoint_bytes(const void* from, void* to, size_t count) {
-  memmove(to, from, count);
+  ia64_conjoint_bytes_prefetch(from, to, count);
 }
 
 static void pd_conjoint_bytes_atomic(const void* from, void* to, size_t count) {
-  memmove(to, from, count);
+  ia64_conjoint_bytes_prefetch(from, to, count);
 }
 
 static void pd_conjoint_jshorts_atomic(const jshort* from, jshort* to, size_t count) {

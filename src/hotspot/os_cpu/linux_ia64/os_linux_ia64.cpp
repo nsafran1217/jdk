@@ -50,6 +50,7 @@
 #include "runtime/stubRoutines.hpp"
 #include "runtime/timer.hpp"
 #include "signals_posix.hpp"
+#include "utilities/copy.hpp"
 #include "utilities/debug.hpp"
 #include "utilities/events.hpp"
 #include "utilities/vmError.hpp"
@@ -423,6 +424,87 @@ int os::extra_bang_size_in_bytes() {
   return 0;
 }
 
+// Large copies. Tukwila has no useful hardware data prefetch: a copy that
+// streams from memory costs ~3 cycles per byte, and ~1.3 with an lfetch of
+// each 128-byte line of both streams 1 KB ahead (tools/gate/copyprobe.c;
+// FINDINGS "Firefox's Montecito probes on Tukwila"). In cache the prefetch
+// costs a little, so only copies of kPfMin bytes or more prefetch. A
+// non-faulting lfetch never traps, also past the end of a buffer (SDM 3:164).
+static const size_t kPfLine  = 128;
+static const size_t kPfAhead = 1024;
+static const size_t kPfMin   = 32 * 1024;
+
+// Element by element, so each element stays single-copy atomic; in the
+// direction that is safe for an overlap.
+template <typename T>
+static void ia64_copy_elements(const T* from, T* to, size_t count) {
+  const size_t per_line = kPfLine / sizeof(T);
+  const bool pf = UsePrefetchCopy && count * sizeof(T) >= kPfMin;
+  if (from > to) {
+    size_t i = 0;
+    if (pf) {
+      for (; i + per_line <= count; i += per_line) {
+        __builtin_prefetch((const char*)(from + i) + kPfAhead, 0, 3);
+        __builtin_prefetch((char*)(to + i) + kPfAhead, 1, 3);
+        for (size_t k = 0; k < per_line; k++) {
+          to[i + k] = from[i + k];
+        }
+      }
+    }
+    for (; i < count; i++) {
+      to[i] = from[i];
+    }
+  } else if (from < to) {
+    size_t i = count;
+    if (pf) {
+      for (; i >= per_line; i -= per_line) {
+        __builtin_prefetch((const char*)(from + i - per_line) - kPfAhead, 0, 3);
+        __builtin_prefetch((char*)(to + i - per_line) - kPfAhead, 1, 3);
+        for (size_t k = per_line; k > 0; k--) {
+          to[i - per_line + k - 1] = from[i - per_line + k - 1];
+        }
+      }
+    }
+    for (; i > 0; i--) {
+      to[i - 1] = from[i - 1];
+    }
+  }
+}
+
+// memmove, with an lfetch of each source and destination line kPfAhead
+// bytes ahead of the 4 KB chunk being moved, for copies of kPfMin bytes
+// or more (UsePrefetchCopy). Chunks go in the direction that is safe for
+// the overlap, as memmove's own copy does.
+void Copy::ia64_conjoint_bytes_prefetch(const void* from, void* to, size_t count) {
+  const char* f = (const char*)from;
+  char* t = (char*)to;
+  if (!UsePrefetchCopy || count < kPfMin) {
+    memmove(t, f, count);
+    return;
+  }
+  const size_t chunk = 4096;
+  if (t <= f || t >= f + count) {
+    size_t i = 0;
+    for (; i + chunk <= count; i += chunk) {
+      for (size_t l = 0; l < chunk; l += kPfLine) {
+        __builtin_prefetch(f + i + kPfAhead + l, 0, 3);
+        __builtin_prefetch(t + i + kPfAhead + l, 1, 3);
+      }
+      memmove(t + i, f + i, chunk);
+    }
+    memmove(t + i, f + i, count - i);
+  } else {
+    size_t i = count;
+    for (; i >= chunk; i -= chunk) {
+      for (size_t l = kPfLine; l <= chunk; l += kPfLine) {
+        __builtin_prefetch(f + i - kPfAhead - l, 0, 3);
+        __builtin_prefetch(t + i - kPfAhead - l, 1, 3);
+      }
+      memmove(t + i - chunk, f + i - chunk, chunk);
+    }
+    memmove(t, f, i);
+  }
+}
 extern "C" {
   int SpinPause() {
     return 0;
@@ -432,70 +514,35 @@ extern "C" {
   // accesses are single-copy atomic, and atomic_copy64 is a plain aligned
   // 8-byte load/store (atomic_linux_ia64.hpp).
   void _Copy_conjoint_jshorts_atomic(const jshort* from, jshort* to, size_t count) {
-    if (from > to) {
-      const jshort *end = from + count;
-      while (from < end) {
-        *(to++) = *(from++);
-      }
-    } else if (from < to) {
-      const jshort *end = from;
-      from += count - 1;
-      to   += count - 1;
-      while (from >= end) {
-        *(to--) = *(from--);
-      }
-    }
+    ia64_copy_elements(from, to, count);
   }
   void _Copy_conjoint_jints_atomic(const jint* from, jint* to, size_t count) {
-    if (from > to) {
-      const jint *end = from + count;
-      while (from < end) {
-        *(to++) = *(from++);
-      }
-    } else if (from < to) {
-      const jint *end = from;
-      from += count - 1;
-      to   += count - 1;
-      while (from >= end) {
-        *(to--) = *(from--);
-      }
-    }
+    ia64_copy_elements(from, to, count);
   }
-
   void _Copy_conjoint_jlongs_atomic(const jlong* from, jlong* to, size_t count) {
-    if (from > to) {
-      const jlong *end = from + count;
-      while (from < end) {
-        atomic_copy64(from++, to++);
-      }
-    } else if (from < to) {
-      const jlong *end = from;
-      from += count - 1;
-      to   += count - 1;
-      while (from >= end) {
-        atomic_copy64(from--, to--);
-      }
-    }
+    ia64_copy_elements(from, to, count);
   }
 
   void _Copy_arrayof_conjoint_bytes(const HeapWord* from,
                                     HeapWord* to,
                                     size_t    count) {
-    memmove(to, from, count);
+    Copy::ia64_conjoint_bytes_prefetch(from, to, count);
   }
   void _Copy_arrayof_conjoint_jshorts(const HeapWord* from,
                                       HeapWord* to,
                                       size_t    count) {
-    memmove(to, from, count * 2);
+    Copy::ia64_conjoint_bytes_prefetch(from, to, count * 2);
   }
   void _Copy_arrayof_conjoint_jints(const HeapWord* from,
                                     HeapWord* to,
                                     size_t    count) {
-    memmove(to, from, count * 4);
+    Copy::ia64_conjoint_bytes_prefetch(from, to, count * 4);
   }
   void _Copy_arrayof_conjoint_jlongs(const HeapWord* from,
                                      HeapWord* to,
                                      size_t    count) {
-    memmove(to, from, count * 8);
+    Copy::ia64_conjoint_bytes_prefetch(from, to, count * 8);
   }
+
+
 };

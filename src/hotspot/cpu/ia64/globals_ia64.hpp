@@ -175,6 +175,10 @@ define_pd_global(intx, InlineSmallCode, 7500);
                                                                                  \
   product(bool, UseIntDivSequence, true, DIAGNOSTIC,                             \
           "Divide ints with GCC's 32-bit sequence (three FMA levels after "      \
-          "frcpa) instead of the 64-bit one")
+          "frcpa) instead of the 64-bit one")                                    \
+                                                                                 \
+  product(bool, UsePrefetchCopy, true, DIAGNOSTIC,                               \
+          "Large C++ array and word copies (arraycopy beyond the stubs' "        \
+          "inline loop, GC copies) lfetch both streams ahead")
 
 #endif // CPU_IA64_GLOBALS_IA64_HPP
