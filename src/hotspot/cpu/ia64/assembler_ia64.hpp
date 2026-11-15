@@ -751,11 +751,15 @@ class Assembler : public AbstractAssembler {
   //  - edges carry latencies: integer load 1 (2 into another access's
   //    address), FP load 6, setf 6, getf 5, F unit 4 (2 to a predicate),
   //    anything else 1; WAW 1; WAR and memory order 0 (same group, in order);
-  //  - memory: loads move freely among themselves; a store stays in order
-  //    with every access unless the two addresses are told apart (same root
-  //    register value in the window, disjoint offset ranges); "system"
-  //    instructions (semaphores, M/I misc, F status ops) and sp/fp writes
-  //    stay in order with all of those. getf/setf are register transfers;
+  //  - memory: loads and stores keep their program order. Under
+  //    UseC2SchedMemoryReordering loads move freely among themselves, and a
+  //    store stays in order with an access only if the two addresses are not
+  //    told apart (same root register value in the window, disjoint offset
+  //    ranges): that lost 6% on J6Bench2 sbuild (allocation-heavy) on
+  //    rx2800, so it is off. "System" instructions (semaphores, M/I misc,
+  //    F status ops) and sp/fp writes stay in order with all memory
+  //    operations either way. getf/setf are register transfers, and F misc
+  //    ALU ops (frcpa, fmerge, fcvt) are not system instructions;
   //  - a cycle-driven ready list: a cycle takes the highest ready
   //    instruction whose latencies have elapsed and that fits the cycle's
   //    ports (2 loads; 2 stores/setf, getf on M2 only; 4 M; 2 I; 2 F;
@@ -959,7 +963,7 @@ class Assembler : public AbstractAssembler {
   void flush_window_machine(int n) {
     SchedOp s[kSchedWindow];
     for (int j = 0; j < n; j++) s[j] = sched_classify(_win[j].u, _win[j].insn, _win[j].d);
-    sched_addrs(n, s);
+    if (UseC2SchedMemoryReordering) sched_addrs(n, s);
     // Edges i -> j (i < j) with latencies; successor lists.
     uint8_t nsucc[kSchedWindow], succ[kSchedWindow][kSchedWindow], slat[kSchedWindow][kSchedWindow];
     uint8_t npred[kSchedWindow];
@@ -984,7 +988,8 @@ class Assembler : public AbstractAssembler {
         if (lat < 0) {
           const SchedOp& p = s[i]; const SchedOp& q = s[j];
           if ((p.ordered && (q.ordered || q.mem)) || (q.ordered && p.mem) ||
-              (p.mem && q.mem && (p.k == SK_ST || q.k == SK_ST) && !sched_disjoint(p, q))) {
+              (p.mem && q.mem && (!UseC2SchedMemoryReordering ||
+                                  ((p.k == SK_ST || q.k == SK_ST) && !sched_disjoint(p, q))))) {
             lat = 0;
           }
         }

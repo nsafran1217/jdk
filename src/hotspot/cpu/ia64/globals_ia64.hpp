@@ -199,8 +199,12 @@ define_pd_global(intx, InlineSmallCode, 7500);
                                                                                  \
   product(bool, UseC2LatencyScheduling, false, DIAGNOSTIC,                       \
           "With UseC2CrossNodeScheduling, schedule C2 code's window by "         \
-          "Itanium 2 latencies and issue ports, loads free among themselves "    \
-          "and past stores to provably different addresses")                     \
+          "Itanium 2 latencies and issue ports "                                \
+          "(memory accesses keep their order, see UseC2SchedMemoryReordering)")  \
+                                                                                 \
+  product(bool, UseC2SchedMemoryReordering, false, DIAGNOSTIC,                   \
+          "With UseC2LatencyScheduling, let loads pass loads, and pass stores "  \
+          "to provably different addresses (lost 6% on J6Bench2 sbuild)")        \
                                                                                  \
   product(uint, C2SchedStressSeed, 0, DIAGNOSTIC,                                \
           "If non-zero, the cross-node scheduling window picks among ready "    \
