@@ -55,6 +55,19 @@
   // single-bundle form.
   void access(MemOp op, int data, Register base, int disp, bool packable = false);
 
+  // Where the implicit null check whose memory node started emitting at
+  // previous_offset faults (PhaseOutput::fill_buffer). Under
+  // UseC2CrossNodeScheduling the window's instructions from earlier nodes go
+  // ahead of the node's barrier access, which then starts later.
+  int implicit_null_check_offset(int previous_offset) const;
+
+ private:
+  // The last single-bundle access: the offset when access() was entered,
+  // and where its bundle starts.
+  int _barrier_entry_offset = -1;
+  int _barrier_offset = -1;
+ public:
+
   // ---- compare and branch (C2-DESIGN.md section 4) ---------------------------
   //
   // The relation is a BoolTest::mask ($cop$$cmpcode).

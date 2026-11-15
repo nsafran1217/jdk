@@ -473,12 +473,33 @@ class Assembler : public AbstractAssembler {
       // recorded offset -- labels, branches, relocations, barriers, memory
       // nodes, call shapes -- closes the open bundle and starts exactly
       // there; packable instructions of the next node may still join it.
-      flush_window();
+      //
+      // Under UseC2CrossNodeScheduling the scheduling window survives too,
+      // so the next node's instructions are scheduled together with this
+      // one's, and the offset returned is only a lower bound for where this
+      // node's code ends. PhaseOutput::fill_buffer calls
+      // CodeBuffer::flush_bundle before the offsets it needs exactly (calls,
+      // safepoints, padding), which makes this offset() flush the window;
+      // implicit null checks take the faulting access's own position
+      // (C2_MacroAssembler::implicit_null_check_offset); anything else that
+      // needs an exact position uses exact_offset(), pc(), or closes the
+      // bundle first.
+      bool flush_requested = code()->pd_take_flush_request();
+      if (!UseC2CrossNodeScheduling || flush_requested) {
+        flush_window();
+      }
       return AbstractAssembler::offset();
     }
     close_bundle();
     return AbstractAssembler::offset();
   }
+  // The offset where the next instruction goes, with every instruction
+  // emitted so far in the buffer (the open bundle may still take more in
+  // C2 emission, see offset()).
+  int exact_offset() { flush_window(); return offset(); }
+  // Whether instructions of one C2 node may be emitted while a later node is
+  // (UseC2CrossNodeScheduling), so per-node emitted sizes mean nothing.
+  bool defers_instructions() const { return _offset_keeps_bundle && UseC2CrossNodeScheduling; }
   // See offset(). Set for the whole of a C2 compilation's emission.
   void set_offset_keeps_bundle(bool on) { close_bundle(); _offset_keeps_bundle = on; }
   // A label also ends the instruction group, keeping the stop before it.
@@ -658,11 +679,30 @@ class Assembler : public AbstractAssembler {
   //    writes of sp or fp, which a fault handler reads (stack bang);
   //  - the window's first instruction stays first: a position recorded
   //    just before it (an implicit null check's pc) names it, and nothing
-  //    after it in program order may execute before it faults.
-  static const int kSchedWindow = 24;
+  //    after it in program order may execute before it faults. Not in C2
+  //    emission under UseC2CrossNodeScheduling, where no recorded position
+  //    names a window instruction: faulting accesses are barrier bundles
+  //    (C2_MacroAssembler::access) and offset() is a lower bound.
+  //
+  // Under UseC2CrossNodeScheduling the window spans C2 nodes (offset()) and
+  // holds up to 48 instructions; otherwise 24. C2SchedStressSeed picks among
+  // the ready instructions at random instead of by height, to shake out
+  // missing dependencies (a wrong result instead of a slow one).
+  static const int kSchedWindow = 48;
+  static const int kSchedWindowNode = 24;
   struct WinInsn { ia64::Insn insn; Unit u; Deps d; bool ordered; };
   WinInsn _win[kSchedWindow];
   int     _win_n = 0;
+  uint64_t _sched_rand = 0;
+
+  int win_limit() const { return defers_instructions() ? kSchedWindow : kSchedWindowNode; }
+  // A stress choice in [0, n), or -1 when not stressing.
+  int sched_stress_pick(int n) {
+    if (C2SchedStressSeed == 0 || !defers_instructions()) return -1;
+    if (_sched_rand == 0) _sched_rand = (uint64_t)C2SchedStressSeed * 0x9e3779b97f4a7c15ULL | 1;
+    _sched_rand ^= _sched_rand << 13; _sched_rand ^= _sched_rand >> 7; _sched_rand ^= _sched_rand << 17;
+    return (int)(_sched_rand % (uint64_t)n);
+  }
 
   static bool is_ordered(Unit u, ia64::Insn insn, const Deps& d) {
     int op = (int)((insn >> 37) & 0xf);
@@ -703,15 +743,16 @@ class Assembler : public AbstractAssembler {
     if (_win_n == 0) return;
     const int n = _win_n;
     _win_n = 0;                         // pack_unit below must not re-enter
-    uint32_t pred[kSchedWindow], strict_succ[kSchedWindow];
+    const bool pin_first = !defers_instructions();
+    uint64_t pred[kSchedWindow], strict_succ[kSchedWindow];
     for (int j = 0; j < n; j++) { pred[j] = 0; strict_succ[j] = 0; }
     for (int j = 1; j < n; j++) {
-      pred[j] |= 1;                     // the first instruction stays first
+      if (pin_first) pred[j] |= 1;      // the first instruction stays first
       for (int i = 0; i < j; i++) {
         bool strict;
         if (depends(_win[i], _win[j], &strict)) {
-          pred[j] |= 1u << i;
-          if (strict) strict_succ[i] |= 1u << j;
+          pred[j] |= (uint64_t)1 << i;
+          if (strict) strict_succ[i] |= (uint64_t)1 << j;
         }
       }
     }
@@ -722,13 +763,14 @@ class Assembler : public AbstractAssembler {
         if (((strict_succ[i] >> j) & 1) && height[j] + 1 > height[i]) height[i] = height[j] + 1;
       }
     }
-    uint32_t done = 0;
+    uint64_t done = 0;
     uint64_t gw[4][2] = {};             // registers written in the group being formed
     int order[kSchedWindow];
     for (int k = 0; k < n; k++) {
       int best = -1;
       for (int pass = 0; pass < 2 && best < 0; pass++) {
         if (pass == 1) memset(gw, 0, sizeof(gw));    // nothing fits: start a new group
+        int ready[kSchedWindow], nready = 0;
         for (int j = 0; j < n; j++) {
           if (((done >> j) & 1) || (pred[j] & ~done) != 0) continue;
           const Deps& d = _win[j].d;
@@ -736,12 +778,17 @@ class Assembler : public AbstractAssembler {
           for (int i = 0; i < d.nrd && !clash; i++) clash = (gw[d.rd_cls[i]][d.rd_num[i] >> 6] >> (d.rd_num[i] & 63)) & 1;
           for (int i = 0; i < d.nwr && !clash; i++) clash = (gw[d.wr_cls[i]][d.wr_num[i] >> 6] >> (d.wr_num[i] & 63)) & 1;
           if (clash) continue;
+          ready[nready++] = j;
           if (best < 0 || height[j] > height[best]) best = j;
+        }
+        if (nready > 1) {
+          int pick = sched_stress_pick(nready);
+          if (pick >= 0) best = ready[pick];
         }
       }
       assert(best >= 0, "a ready instruction always fits an empty group");
       order[k] = best;
-      done |= 1u << best;
+      done |= (uint64_t)1 << best;
       const Deps& d = _win[best].d;
       for (int i = 0; i < d.nwr; i++) gw[d.wr_cls[i]][d.wr_num[i] >> 6] |= (uint64_t)1 << (d.wr_num[i] & 63);
     }
@@ -796,7 +843,7 @@ class Assembler : public AbstractAssembler {
         pack_unit(u, insn, d);
         return;
       }
-      if (_win_n == kSchedWindow) flush_window();
+      if (_win_n >= win_limit()) flush_window();
       WinInsn& w = _win[_win_n++];
       w.insn = insn; w.u = u; w.d = d; w.ordered = is_ordered(u, insn, d);
       return;

@@ -27,7 +27,8 @@
 #define CPU_IA64_CODEBUFFER_IA64_HPP
 
 private:
-  void pd_initialize() {}
+  bool _pd_flush_requested = false;   // see flush_bundle
+  void pd_initialize() { _pd_flush_requested = false; }
 
   // Shared stubs (one trampoline reused by several call sites) are an
   // optimisation, not a requirement; ppc, s390, arm and zero all decline them.
@@ -40,11 +41,18 @@ private:
   }
 
 public:
-  // Careful with the name: this has nothing to do with IA-64 instruction
-  // bundles. It is the x86 scheduling-group hook, and every other port makes it
-  // a no-op. Bundle formation for this port lives in the assembler, which emits
-  // one instruction per 16-byte bundle with the stop bit always set.
-  void flush_bundle(bool start_new_bundle) {}
+  // PhaseOutput::fill_buffer calls this before the offsets it must have
+  // exactly: calls, safepoints, padding. The next Assembler::offset() then
+  // emits every instruction the scheduling window still holds
+  // (UseC2CrossNodeScheduling), so that offset is where the node starts.
+  // Bundle formation itself lives in the assembler; this buffer only
+  // carries the request, having no link to it.
+  void flush_bundle(bool start_new_bundle) { _pd_flush_requested = true; }
+  bool pd_take_flush_request() {
+    bool r = _pd_flush_requested;
+    _pd_flush_requested = false;
+    return r;
+  }
 
   static constexpr bool supports_shared_stubs() { return false; }
 

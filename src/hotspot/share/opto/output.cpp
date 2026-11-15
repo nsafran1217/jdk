@@ -1505,6 +1505,12 @@ void PhaseOutput::fill_buffer(C2_MacroAssembler* masm, uint* blk_starts) {
 
     // Define the label at the beginning of the basic block
     masm->bind(blk_labels[block->_pre_order]);
+#ifdef IA64
+    // bind() emits the instructions the previous block's last nodes left in
+    // the assembler's scheduling window (UseC2CrossNodeScheduling); this
+    // block starts after them.
+    blk_offset = current_offset = masm->offset();
+#endif
 
     uint last_inst = block->number_of_nodes();
 
@@ -1610,7 +1616,14 @@ void PhaseOutput::fill_buffer(C2_MacroAssembler* masm, uint* blk_starts) {
 
           // If this is a null check, then add the start of the previous instruction to the list
         else if( mach->is_MachNullCheck() ) {
+#ifdef IA64
+          // Instructions of earlier nodes the assembler held back for
+          // scheduling go ahead of the faulting access, which may then start
+          // after previous_offset.
+          inct_starts[inct_cnt++] = masm->implicit_null_check_offset(previous_offset);
+#else
           inct_starts[inct_cnt++] = previous_offset;
+#endif
         }
 
           // If this is a branch, then fill in the label with the target BB's label
@@ -1727,7 +1740,13 @@ void PhaseOutput::fill_buffer(C2_MacroAssembler* masm, uint* blk_starts) {
 
 #ifdef ASSERT
       uint n_size = n->size(C->regalloc());
-      if (n_size < (current_offset-instr_offset)) {
+      bool check_size = true;
+#ifdef IA64
+      // A node may also emit instructions of earlier nodes of its block
+      // (UseC2CrossNodeScheduling): only the block's size is bounded.
+      check_size = !masm->defers_instructions();
+#endif
+      if (check_size && n_size < (current_offset-instr_offset)) {
         MachNode* mach = n->as_Mach();
         n->dump();
         mach->dump_format(C->regalloc(), tty);

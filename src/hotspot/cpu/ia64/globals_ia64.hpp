@@ -191,6 +191,14 @@ define_pd_global(intx, InlineSmallCode, 7500);
                                                                                  \
   product(bool, UseC2ProbBranchHints, false, DIAGNOSTIC,                         \
           "C2's conditional branches take their whether-hint from the "          \
-          "branch probability (.dptk if likely taken), not the direction")
+          "branch probability (.dptk if likely taken), not the direction")       \
+                                                                                 \
+  product(bool, UseC2CrossNodeScheduling, false, DIAGNOSTIC,                     \
+          "The scheduling window in C2 code spans node boundaries within a "     \
+          "basic block (with UseC2BundlePacking and UseBundleScheduling)")       \
+                                                                                 \
+  product(uint, C2SchedStressSeed, 0, DIAGNOSTIC,                                \
+          "If non-zero, the cross-node scheduling window picks among ready "    \
+          "instructions at random from this seed (correctness testing)")
 
 #endif // CPU_IA64_GLOBALS_IA64_HPP

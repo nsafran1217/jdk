@@ -101,7 +101,9 @@ void C2_MacroAssembler::access(MemOp op, int data, Register base, int disp, bool
       default: ShouldNotReachHere();
     }
   }
+  _barrier_entry_offset = AbstractAssembler::offset();
   close_bundle();
+  _barrier_offset = AbstractAssembler::offset();
   if (disp == 0) {
     emit_bundle(ia64::BundleM(mem_insn(op, data, base->encoding())));
   } else {
@@ -112,6 +114,18 @@ void C2_MacroAssembler::access(MemOp op, int data, Register base, int disp, bool
                                  mem_insn(op, data, t0->encoding()),
                                  ia64::NopI()));
   }
+}
+
+// fill_buffer reads previous_offset just before the memory node emits, and
+// nothing is emitted between, so an access entered at or after it is that
+// node's (an earlier node's access was entered before its own bundle, so
+// strictly before previous_offset).
+int C2_MacroAssembler::implicit_null_check_offset(int previous_offset) const {
+  if (_barrier_entry_offset >= previous_offset) {
+    return _barrier_offset;
+  }
+  assert(!defers_instructions(), "an implicit null check's access must be a barrier access");
+  return previous_offset;
 }
 
 // ---- compare and branch ---------------------------------------------------

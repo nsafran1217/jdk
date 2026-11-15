@@ -1011,7 +1011,7 @@ void MachPrologNode::emit(C2_MacroAssembler* masm, PhaseRegAlloc* ra_) const {
     Unimplemented();
   }
 
-  C->output()->set_frame_complete(__ offset());
+  C->output()->set_frame_complete(__ exact_offset());
 }
 
 uint MachPrologNode::size(PhaseRegAlloc* ra_) const {
@@ -1105,7 +1105,9 @@ void MachEpilogNode::emit(C2_MacroAssembler* masm, PhaseRegAlloc* ra_) const {
     Label dummy_label;
     Label* code_stub = &dummy_label;
     if (!C->output()->in_scratch_emit_size()) {
-      C2SafepointPollStub* stub = new (C->comp_arena()) C2SafepointPollStub(__ offset());
+      // exact_offset: the poll must not be recorded ahead of instructions
+      // the scheduling window still holds (UseC2CrossNodeScheduling).
+      C2SafepointPollStub* stub = new (C->comp_arena()) C2SafepointPollStub(__ exact_offset());
       C->output()->add_stub(stub);
       code_stub = &stub->entry();
     }
