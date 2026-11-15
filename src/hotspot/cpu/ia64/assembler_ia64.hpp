@@ -763,11 +763,32 @@ class Assembler : public AbstractAssembler {
   }
   static const int kStoreSlot = 64;
 
+  // getf.{s,d,exp,sig} (M opcode 4, x set, x6 0x1c-0x1f). It issues on M2
+  // only, and a store after it in the same instruction group holds the next
+  // group until the getf completes, ~5 cycles, where a stop costs one
+  // (FINDINGS "Firefox's Montecito probes on Tukwila", getf_st; itanium2-sw
+  // 3.3.2). Under UseGetfStoreRule a getf writes a pseudo-resource (BR class,
+  // number 66) that every store reads, so a store never follows a getf in
+  // its group; a store ahead of it is unaffected (that split costs a stop).
+  static bool is_getf(Unit u, ia64::Insn insn) {
+    if (u != U_M) return false;
+    int op = (int)((insn >> 37) & 0xf), m = (int)((insn >> 36) & 1), x = (int)((insn >> 27) & 1),
+        x6 = (int)((insn >> 30) & 0x3f);
+    return op == 4 && m == 0 && x == 1 && x6 >= 0x1c && x6 <= 0x1f;
+  }
+  static const int kGetfPort = 66;
 
   void emit_unit(Unit u, ia64::Insn insn, const Deps& d0) {
     Deps d = d0;
     if (_pack_depth > 0 && UseBundleScheduling && is_store(u, insn) && d.nwr < 3) {
       d.wr(Deps::BR, kStoreSlot);
+    }
+    if (_pack_depth > 0 && UseGetfStoreRule) {
+      if (is_getf(u, insn) && d.nwr < 3) {
+        d.wr(Deps::BR, kGetfPort);
+      } else if (is_store(u, insn) && d.nrd < 6) {
+        d.rd(Deps::BR, kGetfPort);
+      }
     }
     if (_pack_depth > 0 && UseBundleScheduling) {
       if (d.is_branch || d.keep_stop) {

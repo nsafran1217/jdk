@@ -179,6 +179,10 @@ define_pd_global(intx, InlineSmallCode, 7500);
                                                                                  \
   product(bool, UsePrefetchCopy, true, DIAGNOSTIC,                               \
           "Large C++ array and word copies (arraycopy beyond the stubs' "        \
-          "inline loop, GC copies) lfetch both streams ahead")
+          "inline loop, GC copies) lfetch both streams ahead")                   \
+                                                                                 \
+  product(bool, UseGetfStoreRule, true, DIAGNOSTIC,                              \
+          "The packer never puts a store after a getf in one instruction "       \
+          "group (it would hold the next group ~5 cycles)")
 
 #endif // CPU_IA64_GLOBALS_IA64_HPP
