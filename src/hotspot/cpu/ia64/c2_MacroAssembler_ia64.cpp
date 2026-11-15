@@ -151,9 +151,22 @@ void C2_MacroAssembler::cmp_preds(int cmpcode, CmpKind kind, Register a, Registe
   }
 }
 
-void C2_MacroAssembler::cmp_branch(int cmpcode, CmpKind kind, Register a, Register b, Label& L) {
+// Whether-hints from C2's branch probability (UseC2ProbBranchHints). Warm,
+// the predictor ignores hints on Tukwila; cold -- a large code footprint --
+// the hint is the prediction, and a .dpnt branch that is taken mispredicts
+// every time (FINDINGS "Firefox's Montecito probes on Tukwila"). Without a
+// probability, the static guess: .dptk backward, .dpnt forward.
+void C2_MacroAssembler::br_cond_prob(Label& L, PredicateRegister qp, float prob) {
+  ia64::BranchHint hint = L.is_bound() ? ia64::kDptk : ia64::kDpnt;
+  if (UseC2ProbBranchHints && prob >= 0.0f) {
+    hint = (prob > 0.5f) ? ia64::kDptk : ia64::kDpnt;
+  }
+  br_cond(L, qp, hint);
+}
+
+void C2_MacroAssembler::cmp_branch(int cmpcode, CmpKind kind, Register a, Register b, Label& L, float prob) {
   cmp_preds(cmpcode, kind, a, b, ptmp0, ptmp1);
-  br_cond(L, ptmp0);
+  br_cond_prob(L, ptmp0, prob);
 }
 
 // fcmp.eq/lt/le are false when unordered and their complements true, so the
@@ -182,14 +195,14 @@ void C2_MacroAssembler::tbit_preds(int cmpcode, Register a, int bit, PredicateRe
   }
 }
 
-void C2_MacroAssembler::tbit_branch(int cmpcode, Register a, int bit, Label& L) {
+void C2_MacroAssembler::tbit_branch(int cmpcode, Register a, int bit, Label& L, float prob) {
   tbit_preds(cmpcode, a, bit, ptmp0, ptmp1);
-  br_cond(L, ptmp0);
+  br_cond_prob(L, ptmp0, prob);
 }
 
-void C2_MacroAssembler::float_cmp_branch(int cmpcode, FloatRegister a, FloatRegister b, Label& L) {
+void C2_MacroAssembler::float_cmp_branch(int cmpcode, FloatRegister a, FloatRegister b, Label& L, float prob) {
   float_cmp_preds(cmpcode, a, b, ptmp0, ptmp1);
-  br_cond(L, ptmp0);
+  br_cond_prob(L, ptmp0, prob);
 }
 
 // ---- locking -----------------------------------------------------------------

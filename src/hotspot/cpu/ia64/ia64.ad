@@ -5508,7 +5508,7 @@ instruct cmpI_branch(cmpOp cmp, iRegIorL2I op1, iRegIorL2I op2, label lbl)
   format %{ "cmp.$cmp  $op1, $op2 ; br $lbl\t# CmpI, @cmpI_branch" %}
 
   ins_encode %{
-    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_int, $op1$$Register, $op2$$Register, *($lbl$$label));
+    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_int, $op1$$Register, $op2$$Register, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5524,7 +5524,7 @@ instruct cmpI_zero_branch(cmpOp cmp, iRegIorL2I op1, immI0 zero, label lbl)
   format %{ "cmp.$cmp  $op1, r0 ; br $lbl\t# CmpI, @cmpI_zero_branch" %}
 
   ins_encode %{
-    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_int, $op1$$Register, zr, *($lbl$$label));
+    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_int, $op1$$Register, zr, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5544,7 +5544,7 @@ instruct tbitI_branch(cmpOpEqNe cmp, iRegIorL2I op1, immI_pow2 mask, immI0 zero,
   format %{ "tbit.$cmp  $op1, log2($mask) ; br $lbl\t# @tbitI_branch" %}
 
   ins_encode %{
-    __ tbit_branch($cmp$$cmpcode, $op1$$Register, exact_log2((juint)$mask$$constant), *($lbl$$label));
+    __ tbit_branch($cmp$$cmpcode, $op1$$Register, exact_log2((juint)$mask$$constant), *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5561,7 +5561,7 @@ instruct tbitL_branch(cmpOpEqNe cmp, iRegL op1, immL_pow2 mask, immL0 zero, labe
   format %{ "tbit.$cmp  $op1, log2($mask) ; br $lbl\t# @tbitL_branch" %}
 
   ins_encode %{
-    __ tbit_branch($cmp$$cmpcode, $op1$$Register, exact_log2((julong)$mask$$constant), *($lbl$$label));
+    __ tbit_branch($cmp$$cmpcode, $op1$$Register, exact_log2((julong)$mask$$constant), *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5577,7 +5577,7 @@ instruct cmpI_loop(cmpOp cmp, iRegIorL2I op1, iRegIorL2I op2, label lbl)
   format %{ "cmp.$cmp  $op1, $op2 ; br $lbl\t# CmpI, @cmpI_loop" %}
 
   ins_encode %{
-    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_int, $op1$$Register, $op2$$Register, *($lbl$$label));
+    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_int, $op1$$Register, $op2$$Register, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5593,7 +5593,7 @@ instruct cmpI_zero_loop(cmpOp cmp, iRegIorL2I op1, immI0 zero, label lbl)
   format %{ "cmp.$cmp  $op1, r0 ; br $lbl\t# CmpI, @cmpI_zero_loop" %}
 
   ins_encode %{
-    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_int, $op1$$Register, zr, *($lbl$$label));
+    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_int, $op1$$Register, zr, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5609,7 +5609,7 @@ instruct cmpU_branch(cmpOpU cmp, iRegIorL2I op1, iRegIorL2I op2, label lbl)
   format %{ "cmp.$cmp  $op1, $op2 ; br $lbl\t# CmpU, @cmpU_branch" %}
 
   ins_encode %{
-    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_uint, $op1$$Register, $op2$$Register, *($lbl$$label));
+    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_uint, $op1$$Register, $op2$$Register, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5625,7 +5625,7 @@ instruct cmpU_zero_branch(cmpOpU cmp, iRegIorL2I op1, immI0 zero, label lbl)
   format %{ "cmp.$cmp  $op1, r0 ; br $lbl\t# CmpU, @cmpU_zero_branch" %}
 
   ins_encode %{
-    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_uint, $op1$$Register, zr, *($lbl$$label));
+    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_uint, $op1$$Register, zr, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5641,7 +5641,7 @@ instruct cmpL_branch(cmpOp cmp, iRegL op1, iRegL op2, label lbl)
   format %{ "cmp.$cmp  $op1, $op2 ; br $lbl\t# CmpL, @cmpL_branch" %}
 
   ins_encode %{
-    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_long, $op1$$Register, $op2$$Register, *($lbl$$label));
+    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_long, $op1$$Register, $op2$$Register, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5657,7 +5657,7 @@ instruct cmpL_zero_branch(cmpOp cmp, iRegL op1, immL0 zero, label lbl)
   format %{ "cmp.$cmp  $op1, r0 ; br $lbl\t# CmpL, @cmpL_zero_branch" %}
 
   ins_encode %{
-    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_long, $op1$$Register, zr, *($lbl$$label));
+    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_long, $op1$$Register, zr, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5673,7 +5673,7 @@ instruct cmpL_loop(cmpOp cmp, iRegL op1, iRegL op2, label lbl)
   format %{ "cmp.$cmp  $op1, $op2 ; br $lbl\t# CmpL, @cmpL_loop" %}
 
   ins_encode %{
-    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_long, $op1$$Register, $op2$$Register, *($lbl$$label));
+    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_long, $op1$$Register, $op2$$Register, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5689,7 +5689,7 @@ instruct cmpL_zero_loop(cmpOp cmp, iRegL op1, immL0 zero, label lbl)
   format %{ "cmp.$cmp  $op1, r0 ; br $lbl\t# CmpL, @cmpL_zero_loop" %}
 
   ins_encode %{
-    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_long, $op1$$Register, zr, *($lbl$$label));
+    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_long, $op1$$Register, zr, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5705,7 +5705,7 @@ instruct cmpUL_branch(cmpOpU cmp, iRegL op1, iRegL op2, label lbl)
   format %{ "cmp.$cmp  $op1, $op2 ; br $lbl\t# CmpUL, @cmpUL_branch" %}
 
   ins_encode %{
-    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_ulong, $op1$$Register, $op2$$Register, *($lbl$$label));
+    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_ulong, $op1$$Register, $op2$$Register, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5721,7 +5721,7 @@ instruct cmpUL_zero_branch(cmpOpU cmp, iRegL op1, immL0 zero, label lbl)
   format %{ "cmp.$cmp  $op1, r0 ; br $lbl\t# CmpUL, @cmpUL_zero_branch" %}
 
   ins_encode %{
-    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_ulong, $op1$$Register, zr, *($lbl$$label));
+    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_ulong, $op1$$Register, zr, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5737,7 +5737,7 @@ instruct cmpP_branch(cmpOpU cmp, iRegP op1, iRegP op2, label lbl)
   format %{ "cmp.$cmp  $op1, $op2 ; br $lbl\t# CmpP, @cmpP_branch" %}
 
   ins_encode %{
-    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_ulong, $op1$$Register, $op2$$Register, *($lbl$$label));
+    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_ulong, $op1$$Register, $op2$$Register, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5753,7 +5753,7 @@ instruct cmpP_zero_branch(cmpOpU cmp, iRegP op1, immP0 zero, label lbl)
   format %{ "cmp.$cmp  $op1, r0 ; br $lbl\t# CmpP, @cmpP_zero_branch" %}
 
   ins_encode %{
-    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_ulong, $op1$$Register, zr, *($lbl$$label));
+    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_ulong, $op1$$Register, zr, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5769,7 +5769,7 @@ instruct cmpN_branch(cmpOpU cmp, iRegN op1, iRegN op2, label lbl)
   format %{ "cmp.$cmp  $op1, $op2 ; br $lbl\t# CmpN, @cmpN_branch" %}
 
   ins_encode %{
-    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_uint, $op1$$Register, $op2$$Register, *($lbl$$label));
+    __ cmp_branch($cmp$$cmpcode, C2_MacroAssembler::cmp_uint, $op1$$Register, $op2$$Register, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5785,7 +5785,7 @@ instruct cmpF_branch(cmpOp cmp, fRegF op1, fRegF op2, label lbl)
   format %{ "fcmp.$cmp  $op1, $op2 ; br $lbl\t# CmpF, @cmpF_branch" %}
 
   ins_encode %{
-    __ float_cmp_branch($cmp$$cmpcode, $op1$$FloatRegister, $op2$$FloatRegister, *($lbl$$label));
+    __ float_cmp_branch($cmp$$cmpcode, $op1$$FloatRegister, $op2$$FloatRegister, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5801,7 +5801,7 @@ instruct cmpF_loop(cmpOp cmp, fRegF op1, fRegF op2, label lbl)
   format %{ "fcmp.$cmp  $op1, $op2 ; br $lbl\t# CmpF, @cmpF_loop" %}
 
   ins_encode %{
-    __ float_cmp_branch($cmp$$cmpcode, $op1$$FloatRegister, $op2$$FloatRegister, *($lbl$$label));
+    __ float_cmp_branch($cmp$$cmpcode, $op1$$FloatRegister, $op2$$FloatRegister, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5817,7 +5817,7 @@ instruct cmpD_branch(cmpOp cmp, fRegD op1, fRegD op2, label lbl)
   format %{ "fcmp.$cmp  $op1, $op2 ; br $lbl\t# CmpD, @cmpD_branch" %}
 
   ins_encode %{
-    __ float_cmp_branch($cmp$$cmpcode, $op1$$FloatRegister, $op2$$FloatRegister, *($lbl$$label));
+    __ float_cmp_branch($cmp$$cmpcode, $op1$$FloatRegister, $op2$$FloatRegister, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -5833,7 +5833,7 @@ instruct cmpD_loop(cmpOp cmp, fRegD op1, fRegD op2, label lbl)
   format %{ "fcmp.$cmp  $op1, $op2 ; br $lbl\t# CmpD, @cmpD_loop" %}
 
   ins_encode %{
-    __ float_cmp_branch($cmp$$cmpcode, $op1$$FloatRegister, $op2$$FloatRegister, *($lbl$$label));
+    __ float_cmp_branch($cmp$$cmpcode, $op1$$FloatRegister, $op2$$FloatRegister, *($lbl$$label), _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);
@@ -7019,7 +7019,7 @@ instruct cmpFlag_branch(cmpOpEqNe cmp, rFlagsReg cr, label lbl)
   format %{ "(p10/p11) br $lbl\t# RFLAGS $cmp, @cmpFlag_branch" %}
 
   ins_encode %{
-    __ br_cond(*($lbl$$label), ($cmp$$cmpcode == BoolTest::eq) ? p10 : p11);
+    __ br_cond_prob(*($lbl$$label), ($cmp$$cmpcode == BoolTest::eq) ? p10 : p11, _prob);
   %}
 
   ins_pipe(pipe_cmp_branch);

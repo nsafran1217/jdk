@@ -187,6 +187,10 @@ define_pd_global(intx, InlineSmallCode, 7500);
                                                                                  \
   product(bool, UseTbitBranches, true, DIAGNOSTIC,                               \
           "C2 branches and selects on a single-bit test (x & 2^n ==/!= 0) "      \
-          "with tbit")
+          "with tbit")                                                           \
+                                                                                 \
+  product(bool, UseC2ProbBranchHints, true, DIAGNOSTIC,                          \
+          "C2's conditional branches take their whether-hint from the "          \
+          "branch probability (.dptk if likely taken), not the direction")
 
 #endif // CPU_IA64_GLOBALS_IA64_HPP

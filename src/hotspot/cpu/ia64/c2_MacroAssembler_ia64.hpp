@@ -61,14 +61,18 @@
   enum CmpKind { cmp_int, cmp_uint, cmp_long, cmp_ulong };
 
   // Branch to L if (a <cmpcode> b), comparing as kind. Clobbers p6/p7.
-  void cmp_branch(int cmpcode, CmpKind kind, Register a, Register b, Label& L);
+  // The branches of C2's If nodes. prob is the node's _prob, the probability
+  // that the branch is taken (negative: unknown), which picks the hint.
+  void cmp_branch(int cmpcode, CmpKind kind, Register a, Register b, Label& L, float prob = -1.0f);
   // pt = ((a & (1 << bit)) == 0) for eq, != 0 for ne; pf its complement.
   void tbit_preds(int cmpcode, Register a, int bit, PredicateRegister pt, PredicateRegister pf);
   // Branch on (a & (1 << bit)) == 0 (eq) or != 0 (ne): one tbit.
-  void tbit_branch(int cmpcode, Register a, int bit, Label& L);
+  void tbit_branch(int cmpcode, Register a, int bit, Label& L, float prob = -1.0f);
   // Floating point: unordered counts as less, as everywhere in C2 (lt, le and
   // ne are taken for a NaN operand; gt, ge and eq are not).
-  void float_cmp_branch(int cmpcode, FloatRegister a, FloatRegister b, Label& L);
+  void float_cmp_branch(int cmpcode, FloatRegister a, FloatRegister b, Label& L, float prob = -1.0f);
+  // A conditional branch on qp with its whether-hint from prob.
+  void br_cond_prob(Label& L, PredicateRegister qp, float prob);
 
   // Set (pt, pf) to (a <cmpcode> b, its complement).
   void cmp_preds(int cmpcode, CmpKind kind, Register a, Register b,
