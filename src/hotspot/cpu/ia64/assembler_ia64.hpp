@@ -739,10 +739,323 @@ class Assembler : public AbstractAssembler {
     return a.ordered && b.ordered;
   }
 
+  // ---- the machine model (UseC2LatencyScheduling) ---------------------------
+  //
+  // With UseC2CrossNodeScheduling, C2 code's window is scheduled for the
+  // Itanium 2 pipeline instead of by chain height, after Firefox's IA-64
+  // scheduler (src/firefox-jit-ia64-opt, Scheduler-ia64.h) and the model in
+  // tools/sched-model.py (C2-DESIGN.md section 11):
+  //  - edges carry latencies: integer load 1 (2 into another access's
+  //    address), FP load 6, setf 6, getf 5, F unit 4 (2 to a predicate),
+  //    anything else 1; WAW 1; WAR and memory order 0 (same group, in order);
+  //  - memory: loads move freely among themselves; a store stays in order
+  //    with every access unless the two addresses are told apart (same root
+  //    register value in the window, disjoint offset ranges); "system"
+  //    instructions (semaphores, M/I misc, F status ops) and sp/fp writes
+  //    stay in order with all of those. getf/setf are register transfers;
+  //  - a cycle-driven ready list: a cycle takes the highest ready
+  //    instruction whose latencies have elapsed and that fits the cycle's
+  //    ports (2 loads; 2 stores/setf, getf on M2 only; 4 M; 2 I; 2 F;
+  //    A-types on a spare I or M port; 6 syllables), and when nothing fits
+  //    the clock moves to the next cycle in which something is ready.
+  // The packer then lays the order out as before; its stops follow
+  // register conflicts, which the latencies keep in separate cycles.
+  enum SchedKind : uint8_t { SK_A, SK_I, SK_M, SK_LD, SK_LDF, SK_ST, SK_GETF, SK_SETF, SK_F, SK_SYS };
+  struct SchedOp {
+    SchedKind k;
+    bool mem;                 // a load or store (memory ordering)
+    bool ordered;             // a system instruction, or writes sp/fp
+    bool addr_known;          // plain access, unpredicated: base, size valid
+    uint8_t base;             // address register
+    uint8_t size;             // bytes accessed
+    int16_t inc;              // post-increment (0: none or by register)
+    bool reg_update;          // base updated by a register (M2/M7)
+    uint16_t root; int64_t off;  // the address, symbolically (sched_addrs)
+  };
+
+  bool use_machine_model() const { return defers_instructions() && UseC2LatencyScheduling; }
+
+  static SchedOp sched_classify(Unit u, ia64::Insn insn, const Deps& d) {
+    SchedOp s = {};
+    const int op = (int)((insn >> 37) & 0xf);
+    switch (u) {
+      case U_A: s.k = SK_A; break;
+      case U_F:
+        s.k = SK_F;
+        // F misc with xb = 0, x6 < 0x10: break.f, nop.f, fsetc, fclrf, fchkf.
+        if (op <= 1 && ((insn >> 33) & 1) == 0 && ((insn >> 27) & 0x3f) < 0x10) s.k = SK_SYS;
+        break;
+      case U_I:
+        s.k = SK_I;
+        if (op == 0) {                  // I misc: only sxt/zxt/czx are plain ALU
+          int x3 = (int)((insn >> 33) & 0x7), x6 = (int)((insn >> 27) & 0x3f);
+          if (!(x3 == 0 && x6 >= 0x10 && x6 <= 0x1f)) s.k = SK_SYS;
+        }
+        break;
+      case U_M: {
+        const int m = (int)((insn >> 36) & 1), x = (int)((insn >> 27) & 1), x6 = (int)((insn >> 30) & 0x3f);
+        s.k = SK_SYS;
+        if (op == 4 && x == 0) {        // integer ld/st (M1, M2, M4)
+          if (x6 <= 0x03) { s.k = SK_LD; s.size = (uint8_t)(1 << (x6 & 3)); s.reg_update = (m == 1); }
+          else if (x6 >= 0x30 && x6 <= 0x33 && m == 0) { s.k = SK_ST; s.size = (uint8_t)(1 << (x6 & 3)); }
+        } else if (op == 4 && m == 0 && x == 1 && x6 >= 0x1c && x6 <= 0x1f) {
+          s.k = SK_GETF;
+        } else if (op == 5) {           // integer ld/st, imm9 post-increment (M3, M5)
+          int load = x6 <= 0x03, store = x6 >= 0x30 && x6 <= 0x33;
+          if (load || store) {
+            s.k = load ? SK_LD : SK_ST;
+            s.size = (uint8_t)(1 << (x6 & 3));
+            uint64_t lo = load ? (insn >> 13) & 0x7f : (insn >> 6) & 0x7f;
+            uint64_t v = lo | (((insn >> 27) & 1) << 7) | (((insn >> 36) & 1) << 8);
+            s.inc = (int16_t)((int64_t)(v << 55) >> 55);
+          }
+        } else if (op == 6 && x == 0) { // FP ld/st, lfetch (M6, M7, M9, M13)
+          if (x6 == 0x02 || x6 == 0x03) { s.k = SK_LDF; s.size = (x6 & 1) ? 8 : 4; s.reg_update = (m == 1); }
+          else if (x6 == 0x01) { s.k = SK_LDF; s.size = 8; s.reg_update = (m == 1); }
+          else if ((x6 == 0x32 || x6 == 0x33) && m == 0) { s.k = SK_ST; s.size = (x6 & 1) ? 8 : 4; }
+          else if (x6 >= 0x2c && x6 <= 0x2f) { s.k = SK_LD; }          // lfetch: no result
+        } else if (op == 6 && m == 0 && x == 1 && x6 >= 0x1c && x6 <= 0x1f) {
+          s.k = SK_SETF;
+        } else if (op == 7) {           // FP ld/st, imm9 post-increment (M8, M10)
+          int load = (x6 == 0x02 || x6 == 0x03), store = (x6 == 0x32 || x6 == 0x33);
+          if (load || store) {
+            s.k = load ? SK_LDF : SK_ST;
+            s.size = (x6 & 1) ? 8 : 4;
+            uint64_t lo = load ? (insn >> 13) & 0x7f : (insn >> 6) & 0x7f;
+            uint64_t v = lo | (((insn >> 27) & 1) << 7) | (((insn >> 36) & 1) << 8);
+            s.inc = (int16_t)((int64_t)(v << 55) >> 55);
+          }
+        }
+        break;
+      }
+    }
+    s.mem = (s.k == SK_LD || s.k == SK_LDF || s.k == SK_ST);
+    s.ordered = (s.k == SK_SYS);
+    for (int i = 0; i < d.nwr; i++) {
+      if (d.wr_cls[i] == Deps::GR && (d.wr_num[i] == 12 || d.wr_num[i] == 4)) s.ordered = true;  // sp, fp
+    }
+    s.base = (uint8_t)((insn >> 20) & 0x7f);
+    s.addr_known = s.mem && s.size != 0 && (insn & 0x3f) == 0;
+    return s;
+  }
+
+  // Firefox's computeAddrs(): each GR's value as (root, offset), where a root
+  // is a register's value at the window's start or any value defined in it
+  // other than by adds (A4) or a post-increment.
+  void sched_addrs(int n, SchedOp* s) {
+    struct Sym { uint16_t root; int64_t off; };
+    Sym sym[128];
+    for (int r = 0; r < 128; r++) sym[r] = Sym{ (uint16_t)(r + 1), 0 };
+    uint16_t next = 129;
+    for (int j = 0; j < n; j++) {
+      const ia64::Insn insn = _win[j].insn;
+      const Deps& d = _win[j].d;
+      s[j].root = 0;
+      if (s[j].addr_known) { s[j].root = sym[s[j].base].root; s[j].off = sym[s[j].base].off; }
+      // adds r1 = imm14, r3 (unpredicated)
+      bool adds = _win[j].u == U_A && ((insn >> 37) & 0xf) == 8 && ((insn >> 34) & 3) == 2 &&
+                  ((insn >> 33) & 1) == 0 && (insn & 0x3f) == 0;
+      int r1 = (int)((insn >> 6) & 0x7f), r3 = (int)((insn >> 20) & 0x7f);
+      int64_t imm = 0;
+      if (adds) {
+        uint64_t v = ((insn >> 13) & 0x7f) | (((insn >> 27) & 0x3f) << 7) | (((insn >> 36) & 1) << 13);
+        imm = (int64_t)(v << 50) >> 50;
+      }
+      const Sym from = adds ? sym[r3] : Sym{ 0, 0 };
+      for (int i = 0; i < d.nwr; i++) {
+        if (d.wr_cls[i] != Deps::GR) continue;
+        int r = d.wr_num[i];
+        if (adds && r == r1) {
+          sym[r] = Sym{ from.root, from.off + imm };
+        } else if (s[j].mem && r == s[j].base && s[j].inc != 0 && (insn & 0x3f) == 0) {
+          sym[r].off += s[j].inc;
+        } else {
+          sym[r] = Sym{ next++, 0 };
+        }
+      }
+    }
+  }
+
+  static bool sched_disjoint(const SchedOp& a, const SchedOp& b) {
+    return a.root != 0 && a.root == b.root &&
+           (a.off + a.size <= b.off || b.off + b.size <= a.off);
+  }
+
+  // Cycles from a's issue until b, which reads register (c, r) a writes.
+  static int sched_latency(const SchedOp& a, const SchedOp& b, ia64::Insn b_insn, int c, int r) {
+    if (c == Deps::BR) return 1;                       // incl. the pseudo-resources
+    if (c == Deps::PR) return a.k == SK_F ? 2 : 1;
+    if (c == Deps::GR) {
+      if ((a.k == SK_LD || a.k == SK_LDF) && a.mem) {
+        if (r == a.base && (a.inc != 0 || a.reg_update)) return 1;   // the base update
+        if (b.mem && (int)((b_insn >> 20) & 0x7f) == r) return 2;    // into an address
+        return 1;
+      }
+      if (a.k == SK_GETF) return 5;
+      return 1;
+    }
+    // FR
+    if (a.k == SK_LDF) return 6;
+    if (a.k == SK_SETF) return 6;
+    if (a.k == SK_F) return 4;
+    return 1;
+  }
+  static int sched_result_latency(const SchedOp& a) {
+    switch (a.k) {
+      case SK_LDF: case SK_SETF: return 6;
+      case SK_GETF: return 5;
+      case SK_F: return 4;
+      default: return 1;
+    }
+  }
+
+  // Port use of one cycle (tools/sched-model.py fits()).
+  struct Ports { uint8_t ld, st, getf, mgen, i, a, f, n; };
+  static bool sched_fits(const Ports& p, Unit u, SchedKind k) {
+    Ports q = p;
+    switch (k) {
+      case SK_LD: case SK_LDF: q.ld++; break;
+      case SK_ST: case SK_SETF: q.st++; break;
+      case SK_GETF: q.getf++; break;
+      default:
+        switch (u) {
+          case U_M: q.mgen++; break;
+          case U_I: q.i++; break;
+          case U_A: q.a++; break;
+          case U_F: q.f++; break;
+        }
+    }
+    q.n++;
+    if (q.ld > 2 || q.getf > 1 || q.st + q.getf > 2) return false;
+    if (q.i > 2 || q.f > 2) return false;
+    int m = q.ld + q.st + q.getf + q.mgen;
+    if (m > 4) return false;
+    int a_over = q.a - (2 - q.i);
+    if (a_over > 0 && a_over > 4 - m) return false;
+    return q.n <= 6;
+  }
+  static void sched_take(Ports& p, Unit u, SchedKind k) {
+    switch (k) {
+      case SK_LD: case SK_LDF: p.ld++; break;
+      case SK_ST: case SK_SETF: p.st++; break;
+      case SK_GETF: p.getf++; break;
+      default:
+        switch (u) {
+          case U_M: p.mgen++; break;
+          case U_I: p.i++; break;
+          case U_A: p.a++; break;
+          case U_F: p.f++; break;
+        }
+    }
+    p.n++;
+  }
+
+  void flush_window_machine(int n) {
+    SchedOp s[kSchedWindow];
+    for (int j = 0; j < n; j++) s[j] = sched_classify(_win[j].u, _win[j].insn, _win[j].d);
+    sched_addrs(n, s);
+    // Edges i -> j (i < j) with latencies; successor lists.
+    uint8_t nsucc[kSchedWindow], succ[kSchedWindow][kSchedWindow], slat[kSchedWindow][kSchedWindow];
+    uint8_t npred[kSchedWindow];
+    for (int j = 0; j < n; j++) { nsucc[j] = 0; npred[j] = 0; }
+    for (int j = 1; j < n; j++) {
+      const Deps& b = _win[j].d;
+      for (int i = 0; i < j; i++) {
+        const Deps& a = _win[i].d;
+        int lat = -1;
+        for (int x = 0; x < b.nrd; x++) {               // RAW
+          if (writes(a, b.rd_cls[x], b.rd_num[x])) {
+            int l = sched_latency(s[i], s[j], _win[j].insn, b.rd_cls[x], b.rd_num[x]);
+            if (l > lat) lat = l;
+          }
+        }
+        for (int x = 0; x < b.nwr && lat < 1; x++) {    // WAW
+          if (writes(a, b.wr_cls[x], b.wr_num[x])) lat = 1;
+        }
+        for (int x = 0; x < b.nwr && lat < 0; x++) {    // WAR
+          if (reads(a, b.wr_cls[x], b.wr_num[x])) lat = 0;
+        }
+        if (lat < 0) {
+          const SchedOp& p = s[i]; const SchedOp& q = s[j];
+          if ((p.ordered && (q.ordered || q.mem)) || (q.ordered && p.mem) ||
+              (p.mem && q.mem && (p.k == SK_ST || q.k == SK_ST) && !sched_disjoint(p, q))) {
+            lat = 0;
+          }
+        }
+        if (lat >= 0) {
+          succ[i][nsucc[i]] = (uint8_t)j; slat[i][nsucc[i]] = (uint8_t)lat; nsucc[i]++;
+          npred[j]++;
+        }
+      }
+    }
+    // Priority: the longest latency-weighted path to the window's end.
+    int prio[kSchedWindow];
+    for (int i = n - 1; i >= 0; i--) {
+      prio[i] = sched_result_latency(s[i]);
+      for (int k = 0; k < nsucc[i]; k++) {
+        int p = slat[i][k] + prio[succ[i][k]];
+        if (p > prio[i]) prio[i] = p;
+      }
+    }
+    int earliest[kSchedWindow];
+    uint8_t ready[kSchedWindow];
+    int nready = 0;
+    for (int j = 0; j < n; j++) {
+      earliest[j] = 0;
+      if (npred[j] == 0) ready[nready++] = (uint8_t)j;
+    }
+    int order[kSchedWindow];
+    int placed = 0;
+    const bool stress = C2SchedStressSeed != 0;
+    for (int cycle = 0; placed < n;) {
+      Ports ports = {};
+      for (;;) {
+        int best = -1, best_at = -1;
+        if (stress) {
+          if (nready > 0) { best_at = sched_stress_pick(nready); best = ready[best_at]; }
+        } else {
+          for (int r = 0; r < nready; r++) {
+            int j = ready[r];
+            if (earliest[j] > cycle || !sched_fits(ports, _win[j].u, s[j].k)) continue;
+            if (best < 0 || prio[j] > prio[best] || (prio[j] == prio[best] && j < best)) {
+              best = j; best_at = r;
+            }
+          }
+        }
+        if (best < 0) break;
+        order[placed++] = best;
+        sched_take(ports, _win[best].u, s[best].k);
+        ready[best_at] = ready[--nready];
+        for (int k = 0; k < nsucc[best]; k++) {
+          int t = succ[best][k];
+          int at = cycle + slat[best][k];
+          if (at > earliest[t]) earliest[t] = at;
+          if (--npred[t] == 0) ready[nready++] = (uint8_t)t;
+        }
+        if (stress) break;
+      }
+      int next = cycle + 1;
+      if (!stress && nready > 0) {
+        int first = earliest[ready[0]];
+        for (int r = 1; r < nready; r++) if (earliest[ready[r]] < first) first = earliest[ready[r]];
+        if (first > next) next = first;
+      }
+      cycle = next;
+    }
+    for (int k = 0; k < n; k++) {
+      const WinInsn& w = _win[order[k]];
+      pack_unit(w.u, w.insn, w.d);
+    }
+  }
+
   void flush_window() {
     if (_win_n == 0) return;
     const int n = _win_n;
     _win_n = 0;                         // pack_unit below must not re-enter
+    if (use_machine_model()) {
+      flush_window_machine(n);
+      return;
+    }
     const bool pin_first = !defers_instructions();
     uint64_t pred[kSchedWindow], strict_succ[kSchedWindow];
     for (int j = 0; j < n; j++) { pred[j] = 0; strict_succ[j] = 0; }

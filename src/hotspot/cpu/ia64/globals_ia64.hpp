@@ -197,6 +197,11 @@ define_pd_global(intx, InlineSmallCode, 7500);
           "The scheduling window in C2 code spans node boundaries within a "     \
           "basic block (with UseC2BundlePacking and UseBundleScheduling)")       \
                                                                                  \
+  product(bool, UseC2LatencyScheduling, false, DIAGNOSTIC,                       \
+          "With UseC2CrossNodeScheduling, schedule C2 code's window by "         \
+          "Itanium 2 latencies and issue ports, loads free among themselves "    \
+          "and past stores to provably different addresses")                     \
+                                                                                 \
   product(uint, C2SchedStressSeed, 0, DIAGNOSTIC,                                \
           "If non-zero, the cross-node scheduling window picks among ready "    \
           "instructions at random from this seed (correctness testing)")
