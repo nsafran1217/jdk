@@ -193,11 +193,11 @@ define_pd_global(intx, InlineSmallCode, 7500);
           "C2's conditional branches take their whether-hint from the "          \
           "branch probability (.dptk if likely taken), not the direction")       \
                                                                                  \
-  product(bool, UseC2CrossNodeScheduling, false, DIAGNOSTIC,                     \
+  product(bool, UseC2CrossNodeScheduling, true, DIAGNOSTIC,                      \
           "The scheduling window in C2 code spans node boundaries within a "     \
           "basic block (with UseC2BundlePacking and UseBundleScheduling)")       \
                                                                                  \
-  product(bool, UseC2LatencyScheduling, false, DIAGNOSTIC,                       \
+  product(bool, UseC2LatencyScheduling, true, DIAGNOSTIC,                        \
           "With UseC2CrossNodeScheduling, schedule C2 code's window by "         \
           "Itanium 2 latencies and issue ports "                                \
           "(memory accesses keep their order, see UseC2SchedMemoryReordering)")  \
