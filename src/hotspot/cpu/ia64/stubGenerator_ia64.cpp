@@ -175,7 +175,10 @@ class StubGenerator: public StubCodeGenerator {
 
     // The one and only alloc (FRAME-DESIGN.md section 1). t1 = the C
     // caller's ar.pfs, which br.ret will need back.
-    __ alloc(t1, 0, 0, 8, 0);
+    // Under UseC2RenamePool the outputs are 24: out0-out7 plus r40-r55, the
+    // pool C2's scheduling window renames dead values into (assembler_ia64.hpp,
+    // rename_window). Outputs, so every call clobbers them.
+    __ alloc(t1, 0, 0, UseC2RenamePool ? 24 : 8, 0);
     __ mov_from_br(t0, breturn);
 
     // Lower sp first: there is no red zone, so nothing may be stored below

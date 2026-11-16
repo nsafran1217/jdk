@@ -206,6 +206,10 @@ define_pd_global(intx, InlineSmallCode, 7500);
           "With UseC2LatencyScheduling, let loads pass loads, and pass stores "  \
           "to provably different addresses (lost 6% on J6Bench2 sbuild)")        \
                                                                                  \
+  product(bool, UseC2RenamePool, false, DIAGNOSTIC,                              \
+          "With UseC2LatencyScheduling, rename values that die inside the "      \
+          "scheduling window into r40-r55 (call_stub allocates 24 outputs)")     \
+                                                                                 \
   product(uint, C2SchedStressSeed, 0, DIAGNOSTIC,                                \
           "If non-zero, the cross-node scheduling window picks among ready "    \
           "instructions at random from this seed (correctness testing)")
