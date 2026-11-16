@@ -210,6 +210,10 @@ define_pd_global(intx, InlineSmallCode, 7500);
           "With UseC2LatencyScheduling, rename values that die inside the "      \
           "scheduling window into r40-r55 (call_stub allocates 24 outputs)")     \
                                                                                  \
+  product(bool, UseC2RenamePredicates, false, DIAGNOSTIC,                        \
+          "With UseC2LatencyScheduling, rename predicates that die inside the "  \
+          "scheduling window into p12-p15")                                      \
+                                                                                 \
   product(uint, C2SchedStressSeed, 0, DIAGNOSTIC,                                \
           "If non-zero, the cross-node scheduling window picks among ready "    \
           "instructions at random from this seed (correctness testing)")

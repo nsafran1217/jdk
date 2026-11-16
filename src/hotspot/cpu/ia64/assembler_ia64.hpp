@@ -338,6 +338,12 @@ class Assembler : public AbstractAssembler {
     Deps& w6(Register x)         { return wr(GR, x->encoding(), 6); }
     Deps& r13(Register x)        { return x->encoding() == 0 ? *this : rd(GR, x->encoding(), 13); }
     Deps& r20(Register x)        { return x->encoding() == 0 ? *this : rd(GR, x->encoding(), 20); }
+    // A predicate written through a 6-bit p1/p2 field by a plain compare,
+    // tbit or fcmp: a full write when unpredicated (UseC2RenamePredicates).
+    // Not for parallel compares. pos only marks the write as such: the ne
+    // forms swap p1 and p2 in the encoding, so rename_predicates() finds
+    // the field from the instruction bits.
+    Deps& wp(PredicateRegister x, int pos) { return x.encoding() == 0 ? *this : wr(PR, x.encoding(), pos); }
     Deps& r(FloatRegister x)     { return x->encoding() <= 1 ? *this : rd(FR, x->encoding()); }
     Deps& w(FloatRegister x)     { return wr(FR, x->encoding()); }
     Deps& r(PredicateRegister x) { return x.encoding() == 0 ? *this : rd(PR, x.encoding()); }
@@ -1008,6 +1014,87 @@ class Assembler : public AbstractAssembler {
     return (int)((w.u == U_L ? (w.insn >> 7) : w.insn) & 0x3f);
   }
 
+  // Predicates (UseC2RenamePredicates), the same way: C2 code compares into
+  // p6-p11, and every compare reuses p6/p7, so independent compare-and-cmov
+  // sequences of consecutive nodes stay in order. A predicate written by an
+  // unpredicated tagged compare (Deps::wp) and rewritten by another before
+  // the window ends, read in between only as qualifying predicates, moves
+  // to p12-p15: scratch under the C ABI and never used by C2 code (only the
+  // interpreter's fcmp template uses them). A window touching p12+ is left
+  // alone.
+  static const int kPrPoolBase = 12, kPrPoolSize = 4;
+  static ia64::Insn set_qp(const WinInsn& w, int p) {
+    const int at = (w.u == U_L) ? 7 : 0;
+    return (w.insn & ~((ia64::Insn)0x3f << at)) | ((ia64::Insn)p << at);
+  }
+
+  int rename_predicates(int n) {
+    for (int j = 0; j < n; j++) {
+      const Deps& d = _win[j].d;
+      for (int x = 0; x < d.nrd; x++) if (d.rd_cls[x] == Deps::PR && d.rd_num[x] >= kPrPoolBase) return 0;
+      for (int x = 0; x < d.nwr; x++) if (d.wr_cls[x] == Deps::PR && d.wr_num[x] >= kPrPoolBase) return 0;
+    }
+    int busy[kPrPoolSize];
+    for (int q = 0; q < kPrPoolSize; q++) busy[q] = -1;
+    int renamed = 0;
+    for (int i = 0; i + 1 < n; i++) {
+      WinInsn& a = _win[i];
+      if (a.u == U_L || win_qp(a) != 0) continue;
+      for (int dw = 0; dw < a.d.nwr; dw++) {
+        if (a.d.wr_cls[dw] != Deps::PR || a.d.wr_pos[dw] == 0) continue;
+        const int r = a.d.wr_num[dw];
+        if (r < 6 || r > 11) continue;
+        // The tag says the write is a full one through a p1/p2 field; which
+        // field holds r comes from the encoding (the ne forms swap p1 and p2).
+        const bool at6 = (int)((a.insn >> 6) & 0x3f) == r, at27 = (int)((a.insn >> 27) & 0x3f) == r;
+        if (at6 == at27) continue;
+        const int pos = at6 ? 6 : 27;
+        bool ok = true;
+        int kill = -1, last = i;
+        for (int k = i + 1; k < n && ok && kill < 0; k++) {
+          const WinInsn& b = _win[k];
+          bool writes = false, tagged = true;
+          for (int e = 0; e < b.d.nwr; e++) {
+            if (b.d.wr_cls[e] == Deps::PR && b.d.wr_num[e] == r) {
+              writes = true;
+              if (b.d.wr_pos[e] == 0) tagged = false;
+            }
+          }
+          for (int x = 0; x < b.d.nrd; x++) {
+            if (b.d.rd_cls[x] == Deps::PR && b.d.rd_num[x] == r) {
+              if (win_qp(b) != r) ok = false;   // an implicit read
+              last = k;
+            }
+          }
+          if (writes) {
+            if (win_qp(b) != 0 || !tagged) ok = false;
+            kill = k;
+          }
+        }
+        if (!ok || kill < 0) continue;
+        int p = -1;
+        for (int q = 0; q < kPrPoolSize; q++) {
+          if (busy[q] <= i && (p < 0 || busy[q] < busy[p])) p = q;
+        }
+        if (p < 0) continue;
+        const int pr = kPrPoolBase + p;
+        a.insn = (a.insn & ~((ia64::Insn)0x3f << pos)) | ((ia64::Insn)pr << pos);
+        a.d.wr_num[dw] = (uint8_t)pr;
+        for (int k = i + 1; k < kill; k++) {   // K is unpredicated: it does not read it
+          WinInsn& b = _win[k];
+          bool reads = false;
+          for (int x = 0; x < b.d.nrd; x++) {
+            if (b.d.rd_cls[x] == Deps::PR && b.d.rd_num[x] == r) { b.d.rd_num[x] = (uint8_t)pr; reads = true; }
+          }
+          if (reads) b.insn = set_qp(b, pr);
+        }
+        busy[p] = last;
+        renamed++;
+      }
+    }
+    return renamed;
+  }
+
   int rename_window(int n) {
     for (int j = 0; j < n; j++) {
       const Deps& d = _win[j].d;
@@ -1073,6 +1160,7 @@ class Assembler : public AbstractAssembler {
 
   void flush_window_machine(int n) {
     if (UseC2RenamePool) rename_window(n);
+    if (UseC2RenamePredicates) rename_predicates(n);
     SchedOp s[kSchedWindow];
     for (int j = 0; j < n; j++) s[j] = sched_classify(_win[j].u, _win[j].insn, _win[j].d);
     if (UseC2SchedMemoryReordering) sched_addrs(n, s);
@@ -1490,20 +1578,20 @@ class Assembler : public AbstractAssembler {
   // int comparisons want. The immediate forms take the 8-bit immediate as the
   // FIRST operand: cmp_lt_imm(p1, p2, 5, r) tests 5 < r.
 
-  void cmp_eq(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::CmpEq(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r13(r2).r20(r3).r(qp)); }
-  void cmp_ne(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::CmpNe(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r13(r2).r20(r3).r(qp)); }
-  void cmp_lt(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::CmpLt(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r13(r2).r20(r3).r(qp)); }
-  void cmp_ltu(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP) { emit_a(ia64::CmpLtu(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r13(r2).r20(r3).r(qp)); }
+  void cmp_eq(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::CmpEq(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().wp(p1, 6).wp(p2, 27).r13(r2).r20(r3).r(qp)); }
+  void cmp_ne(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::CmpNe(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().wp(p1, 6).wp(p2, 27).r13(r2).r20(r3).r(qp)); }
+  void cmp_lt(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::CmpLt(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().wp(p1, 6).wp(p2, 27).r13(r2).r20(r3).r(qp)); }
+  void cmp_ltu(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP) { emit_a(ia64::CmpLtu(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().wp(p1, 6).wp(p2, 27).r13(r2).r20(r3).r(qp)); }
 
-  void cmp4_eq(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::Cmp4Eq(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r13(r2).r20(r3).r(qp)); }
-  void cmp4_ne(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::Cmp4Ne(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r13(r2).r20(r3).r(qp)); }
-  void cmp4_lt(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::Cmp4Lt(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r13(r2).r20(r3).r(qp)); }
-  void cmp4_ltu(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP) { emit_a(ia64::Cmp4Ltu(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().w(p1).w(p2).r13(r2).r20(r3).r(qp)); }
+  void cmp4_eq(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::Cmp4Eq(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().wp(p1, 6).wp(p2, 27).r13(r2).r20(r3).r(qp)); }
+  void cmp4_ne(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::Cmp4Ne(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().wp(p1, 6).wp(p2, 27).r13(r2).r20(r3).r(qp)); }
+  void cmp4_lt(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP)  { emit_a(ia64::Cmp4Lt(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().wp(p1, 6).wp(p2, 27).r13(r2).r20(r3).r(qp)); }
+  void cmp4_ltu(PredicateRegister p1, PredicateRegister p2, Register r2, Register r3, QP) { emit_a(ia64::Cmp4Ltu(p1.encoding(), p2.encoding(), r2->encoding(), r3->encoding(), Q), D().wp(p1, 6).wp(p2, 27).r13(r2).r20(r3).r(qp)); }
 
 #define CMP_IMM(name, Enc) \
   void name(PredicateRegister p1, PredicateRegister p2, int64_t imm8, Register r3, QP) { \
     assert(ia64::is_simm8(imm8), "imm8"); \
-    emit_a(ia64::Enc(p1.encoding(), p2.encoding(), imm8, r3->encoding(), Q), D().w(p1).w(p2).r20(r3).r(qp)); \
+    emit_a(ia64::Enc(p1.encoding(), p2.encoding(), imm8, r3->encoding(), Q), D().wp(p1, 6).wp(p2, 27).r20(r3).r(qp)); \
   }
   CMP_IMM(cmp_eq_imm,   CmpEqImm)
   CMP_IMM(cmp_ne_imm,   CmpNeImm)
@@ -1516,8 +1604,8 @@ class Assembler : public AbstractAssembler {
 #undef CMP_IMM
 
   // p1 = (bit pos of r3 is clear) / (is set); p2 the complement.
-  void tbit_z(PredicateRegister p1, PredicateRegister p2, Register r3, int pos, QP)  { emit_i(ia64::TbitZ(p1.encoding(), p2.encoding(), r3->encoding(), pos, Q), D().w(p1).w(p2).r20(r3).r(qp)); }
-  void tbit_nz(PredicateRegister p1, PredicateRegister p2, Register r3, int pos, QP) { emit_i(ia64::TbitNz(p1.encoding(), p2.encoding(), r3->encoding(), pos, Q), D().w(p1).w(p2).r20(r3).r(qp)); }
+  void tbit_z(PredicateRegister p1, PredicateRegister p2, Register r3, int pos, QP)  { emit_i(ia64::TbitZ(p1.encoding(), p2.encoding(), r3->encoding(), pos, Q), D().wp(p1, 6).wp(p2, 27).r20(r3).r(qp)); }
+  void tbit_nz(PredicateRegister p1, PredicateRegister p2, Register r3, int pos, QP) { emit_i(ia64::TbitNz(p1.encoding(), p2.encoding(), r3->encoding(), pos, Q), D().wp(p1, 6).wp(p2, 27).r20(r3).r(qp)); }
 
   // ---- shifts, extends (I unit) ------------------------------------------
 
@@ -1755,10 +1843,10 @@ class Assembler : public AbstractAssembler {
   void fcvt_fx_trunc(FloatRegister f1, FloatRegister f2, ia64::FpSf sf, QP) { emit_f(ia64::FcvtFxTrunc(f1->encoding(), f2->encoding(), sf, Q), D().w(f1).r(f2).r(qp)); }
   void fcvt_fxu_trunc(FloatRegister f1, FloatRegister f2, ia64::FpSf sf, QP) { emit_f(ia64::FcvtFxuTrunc(f1->encoding(), f2->encoding(), sf, Q), D().w(f1).r(f2).r(qp)); }
   // p1 = relation, p2 = !relation; an unordered operand makes eq/lt/le false.
-  void fcmp_eq(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpEq(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().w(p1).w(p2).r(f2).r(f3).r(qp).fp_predicate()); }
-  void fcmp_lt(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpLt(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().w(p1).w(p2).r(f2).r(f3).r(qp).fp_predicate()); }
-  void fcmp_le(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpLe(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().w(p1).w(p2).r(f2).r(f3).r(qp).fp_predicate()); }
-  void fcmp_unord(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP) { emit_f(ia64::FcmpUnord(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().w(p1).w(p2).r(f2).r(f3).r(qp).fp_predicate()); }
+  void fcmp_eq(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpEq(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().wp(p1, 6).wp(p2, 27).r(f2).r(f3).r(qp).fp_predicate()); }
+  void fcmp_lt(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpLt(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().wp(p1, 6).wp(p2, 27).r(f2).r(f3).r(qp).fp_predicate()); }
+  void fcmp_le(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP)    { emit_f(ia64::FcmpLe(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().wp(p1, 6).wp(p2, 27).r(f2).r(f3).r(qp).fp_predicate()); }
+  void fcmp_unord(PredicateRegister p1, PredicateRegister p2, FloatRegister f2, FloatRegister f3, QP) { emit_f(ia64::FcmpUnord(p1.encoding(), p2.encoding(), f2->encoding(), f3->encoding(), ia64::sf0, Q), D().wp(p1, 6).wp(p2, 27).r(f2).r(f3).r(qp).fp_predicate()); }
 
   // r1 = r2 with its eight bytes reversed.
   void unpack1_l(Register r1, Register r2, Register r3, QP) { emit_i(ia64::Unpack1L(r1->encoding(), r2->encoding(), r3->encoding(), Q), D().w(r1).r(r2).r(r3).r(qp)); }
