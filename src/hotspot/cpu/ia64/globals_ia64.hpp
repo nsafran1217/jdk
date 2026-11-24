@@ -206,6 +206,11 @@ define_pd_global(intx, InlineSmallCode, 7500);
           "With UseC2LatencyScheduling, let loads pass loads, and pass stores "  \
           "to provably different addresses (lost 6% on J6Bench2 sbuild)")        \
                                                                                  \
+  product(bool, UseC2GuardCrossing, false, DIAGNOSTIC,                           \
+          "With UseC2LatencyScheduling, branches to uncommon traps enter the "  \
+          "scheduling window, and instructions that write nothing the trap "    \
+          "reads move across them")                                             \
+                                                                                 \
   product(bool, UseC2RenamePool, false, DIAGNOSTIC,                              \
           "With UseC2LatencyScheduling, rename values that die inside the "      \
           "scheduling window into r40-r55 (call_stub allocates 24 outputs)")     \

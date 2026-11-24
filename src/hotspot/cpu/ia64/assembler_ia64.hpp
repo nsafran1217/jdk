@@ -359,6 +359,28 @@ class Assembler : public AbstractAssembler {
   };
   static Deps D() { return Deps(); }
 
+  // The registers a guard's taken path reads (br_cond_guard): bit n of
+  // gr/fr for rn/fn, of pr for pn.
+  struct GuardLive {
+    uint64_t gr[2] = {}, fr[2] = {}, pr = 0;
+    void add(int cls, int n) {
+      switch (cls) {
+        case Deps::GR: gr[n >> 6] |= (uint64_t)1 << (n & 63); break;
+        case Deps::FR: fr[n >> 6] |= (uint64_t)1 << (n & 63); break;
+        case Deps::PR: pr |= (uint64_t)1 << (n & 63); break;
+        default: break;
+      }
+    }
+  };
+  static bool guard_live(const GuardLive& l, int cls, int n) {
+    switch (cls) {
+      case Deps::GR: return (l.gr[n >> 6] >> (n & 63)) & 1;
+      case Deps::FR: return (l.fr[n >> 6] >> (n & 63)) & 1;
+      case Deps::PR: return (l.pr >> (n & 63)) & 1;
+      default:       return n < 64;           // a real branch register; not the pseudo-resources
+    }
+  }
+
  private:
   uint64_t     _pend[4][2] = {};         // registers written in the open group
   uint64_t     _pend_fp_pr = 0;          // ... of which predicates by FP insns
@@ -437,7 +459,8 @@ class Assembler : public AbstractAssembler {
   // -- except that br_cond to a label may take slot 2 of the open bundle
   // (UseBranchPacking), its patch site then being that bundle.
   // U_L: a movl in the scheduling window (movl_const), packed as an MLX bundle.
-  enum Unit : uint8_t { U_M, U_I, U_A, U_F, U_L };
+  // U_B: a guard branch in the scheduling window (br_cond_guard).
+  enum Unit : uint8_t { U_M, U_I, U_A, U_F, U_L, U_B };
 
   void emit_m(ia64::Insn i, const Deps& d) { emit_unit(U_M, i, d); }
   void emit_i(ia64::Insn i, const Deps& d) { emit_unit(U_I, i, d); }
@@ -556,7 +579,7 @@ class Assembler : public AbstractAssembler {
       case U_I: return slot == 'I';
       case U_A: return slot == 'M' || slot == 'I';
       case U_F: return slot == 'F';
-      case U_L: return false;
+      case U_L: case U_B: return false;
     }
     return false;
   }
@@ -705,7 +728,10 @@ class Assembler : public AbstractAssembler {
   static const int kSchedWindow = 48;
   static const int kSchedWindowNode = 24;
   // U_L: insn holds r1 (bits 6:0) and qp (12:7), imm the 64-bit constant.
-  struct WinInsn { ia64::Insn insn; uint64_t imm; Unit u; Deps d; bool ordered; };
+  // U_B: insn is the br.cond with a zero displacement (its qp, renamed like
+  // any other reader's, and hint); label its target, live the guard's.
+  struct WinInsn { ia64::Insn insn; uint64_t imm; Unit u; Deps d; bool ordered;
+                   Label* label; GuardLive live; };
   WinInsn _win[kSchedWindow];
   int     _win_n = 0;
   uint64_t _sched_rand = 0;
@@ -729,7 +755,7 @@ class Assembler : public AbstractAssembler {
                 }
                 break;
       case U_F: if (op <= 1) return true; break;          // F misc (fsetc, fclrf, frcpa, ...)
-      case U_A: case U_L: break;
+      case U_A: case U_L: case U_B: break;
     }
     for (int i = 0; i < d.nwr; i++) {
       if (d.wr_cls[i] == Deps::GR && (d.wr_num[i] == 12 || d.wr_num[i] == 4)) return true;  // sp, fp
@@ -779,7 +805,7 @@ class Assembler : public AbstractAssembler {
   //    the clock moves to the next cycle in which something is ready.
   // The packer then lays the order out as before; its stops follow
   // register conflicts, which the latencies keep in separate cycles.
-  enum SchedKind : uint8_t { SK_A, SK_I, SK_M, SK_LD, SK_LDF, SK_ST, SK_GETF, SK_SETF, SK_F, SK_SYS, SK_L };
+  enum SchedKind : uint8_t { SK_A, SK_I, SK_M, SK_LD, SK_LDF, SK_ST, SK_GETF, SK_SETF, SK_F, SK_SYS, SK_L, SK_BR };
   struct SchedOp {
     SchedKind k;
     bool mem;                 // a load or store (memory ordering)
@@ -800,6 +826,7 @@ class Assembler : public AbstractAssembler {
     switch (u) {
       case U_A: s.k = SK_A; break;
       case U_L: s.k = SK_L; break;
+      case U_B: s.k = SK_BR; break;
       case U_F:
         s.k = SK_F;
         // F misc with xb = 0, x6 < 0x10: break.f, nop.f, fsetc, fclrf, fchkf.
@@ -904,7 +931,9 @@ class Assembler : public AbstractAssembler {
   // Cycles from a's issue until b, which reads register (c, r) a writes.
   static int sched_latency(const SchedOp& a, const SchedOp& b, ia64::Insn b_insn, int c, int r) {
     if (c == Deps::BR) return 1;                       // incl. the pseudo-resources
-    if (c == Deps::PR) return a.k == SK_F ? 2 : 1;
+    // A branch may read a predicate an integer compare writes in its own
+    // group (SDM 1:42), not one an fcmp writes.
+    if (c == Deps::PR) return a.k == SK_F ? 2 : (b.k == SK_BR ? 0 : 1);
     if (c == Deps::GR) {
       if ((a.k == SK_LD || a.k == SK_LDF) && a.mem) {
         if (r == a.base && (a.inc != 0 || a.reg_update)) return 1;   // the base update
@@ -938,12 +967,14 @@ class Assembler : public AbstractAssembler {
       case SK_ST: case SK_SETF: q.st++; break;
       case SK_GETF: q.getf++; break;
       case SK_L: q.i++; q.n++; break;            // L+X: an I port, two syllables
+      case SK_BR: break;                         // a B slot; one per cycle (flush_window_machine)
       default:
         switch (u) {
           case U_M: q.mgen++; break;
           case U_I: q.i++; break;
           case U_A: q.a++; break;
           case U_F: q.f++; break;
+          default: break;
         }
     }
     q.n++;
@@ -961,12 +992,14 @@ class Assembler : public AbstractAssembler {
       case SK_ST: case SK_SETF: p.st++; break;
       case SK_GETF: p.getf++; break;
       case SK_L: p.i++; p.n++; break;
+      case SK_BR: break;
       default:
         switch (u) {
           case U_M: p.mgen++; break;
           case U_I: p.i++; break;
           case U_A: p.a++; break;
           case U_F: p.f++; break;
+          default: break;
         }
     }
     p.n++;
@@ -980,7 +1013,9 @@ class Assembler : public AbstractAssembler {
   // between (K's own reads included) in a tagged register field (Deps::w6,
   // r13, r20), gets a pool register instead: D writes it, those reads read it,
   // K still writes the original. The window is straight-line code (branches,
-  // calls, labels and barriers flush it), so after K, and at the window's
+  // calls, labels and barriers flush it) but for guards (br_cond_guard),
+  // whose trap block reads only its live set: a register live there is not
+  // renamed across the guard. So after K, and at the window's
   // end, every register holds what it would have, and the pool register is
   // dead before the window ends: nothing outside the window -- debug info,
   // oop maps, the allocator -- can see the difference. Refused when a read
@@ -1066,6 +1101,7 @@ class Assembler : public AbstractAssembler {
               last = k;
             }
           }
+          if (b.u == U_B && guard_live(b.live, Deps::PR, r)) ok = false;   // the trap reads it
           if (writes) {
             if (win_qp(b) != 0 || !tagged) ok = false;
             kill = k;
@@ -1128,6 +1164,7 @@ class Assembler : public AbstractAssembler {
               last = k;
             }
           }
+          if (b.u == U_B && guard_live(b.live, Deps::GR, r)) ok = false;   // the trap reads it
           if (writes) {
             if (win_qp(b) != 0) ok = false;
             kill = k;
@@ -1156,6 +1193,28 @@ class Assembler : public AbstractAssembler {
       }
     }
     return renamed;
+  }
+
+  // Guards (UseC2GuardCrossing; Firefox's Scheduler::mayCross). Instructions
+  // i < j, one of them a guard branch g and otherwise independent: may the
+  // other one, x, swap with it? Both directions need x to write nothing the
+  // trap block reads, so the trap sees every value as in program order, and
+  // not to be a store or a system instruction, so memory and machine state
+  // are the same too. A load may move below a guard but not above it: the
+  // guard is what makes its address valid (a range, type or null check).
+  // Branches keep their order among themselves.
+  bool guard_may_cross(int i, int j, const SchedOp* s) const {
+    if (s[i].k == SK_BR && s[j].k == SK_BR) return false;
+    const bool up = s[i].k == SK_BR;
+    const int g = up ? i : j, x = up ? j : i;
+    const SchedOp& o = s[x];
+    if (o.ordered || o.k == SK_SYS || o.k == SK_ST) return false;
+    if (o.mem && up) return false;
+    const Deps& d = _win[x].d;
+    for (int k = 0; k < d.nwr; k++) {
+      if (guard_live(_win[g].live, d.wr_cls[k], d.wr_num[k])) return false;
+    }
+    return true;
   }
 
   void flush_window_machine(int n) {
@@ -1193,6 +1252,9 @@ class Assembler : public AbstractAssembler {
             lat = 0;
           }
         }
+        if (lat < 0 && (s[i].k == SK_BR || s[j].k == SK_BR) && !guard_may_cross(i, j, s)) {
+          lat = 0;
+        }
         if (lat >= 0) {
           succ[i][nsucc[i]] = (uint8_t)j; slat[i][nsucc[i]] = (uint8_t)lat; nsucc[i]++;
           npred[j]++;
@@ -1220,6 +1282,10 @@ class Assembler : public AbstractAssembler {
     const bool stress = C2SchedStressSeed != 0;
     for (int cycle = 0; placed < n;) {
       Ports ports = {};
+      // A guard taken in this cycle goes last in it: Itanium 2 splits issue
+      // after any bundle holding a branch (itanium2-sw 3.3.3). Its
+      // successors wait for the next cycle.
+      int branch = -1;
       for (;;) {
         int best = -1, best_at = -1;
         if (stress) {
@@ -1228,15 +1294,20 @@ class Assembler : public AbstractAssembler {
           for (int r = 0; r < nready; r++) {
             int j = ready[r];
             if (earliest[j] > cycle || !sched_fits(ports, _win[j].u, s[j].k)) continue;
+            if (s[j].k == SK_BR && branch >= 0) continue;
             if (best < 0 || prio[j] > prio[best] || (prio[j] == prio[best] && j < best)) {
               best = j; best_at = r;
             }
           }
         }
         if (best < 0) break;
-        order[placed++] = best;
         sched_take(ports, _win[best].u, s[best].k);
         ready[best_at] = ready[--nready];
+        if (!stress && s[best].k == SK_BR) {
+          branch = best;
+          continue;
+        }
+        order[placed++] = best;
         for (int k = 0; k < nsucc[best]; k++) {
           int t = succ[best][k];
           int at = cycle + slat[best][k];
@@ -1244,6 +1315,15 @@ class Assembler : public AbstractAssembler {
           if (--npred[t] == 0) ready[nready++] = (uint8_t)t;
         }
         if (stress) break;
+      }
+      if (branch >= 0) {
+        order[placed++] = branch;
+        for (int k = 0; k < nsucc[branch]; k++) {
+          int t = succ[branch][k];
+          int at = cycle + 1;
+          if (at > earliest[t]) earliest[t] = at;
+          if (--npred[t] == 0) ready[nready++] = (uint8_t)t;
+        }
       }
       int next = cycle + 1;
       if (!stress && nready > 0) {
@@ -1268,6 +1348,7 @@ class Assembler : public AbstractAssembler {
       return;
     }
     const bool pin_first = !defers_instructions();
+    for (int j = 0; j < n; j++) assert(_win[j].u != U_B, "guards are windowed only under the machine model");
     uint64_t pred[kSchedWindow], strict_succ[kSchedWindow];
     for (int j = 0; j < n; j++) { pred[j] = 0; strict_succ[j] = 0; }
     for (int j = 1; j < n; j++) {
@@ -1427,6 +1508,10 @@ class Assembler : public AbstractAssembler {
   void pack_win(const WinInsn& w) {
     if (w.u == U_L) {
       pack_movl(w);
+    } else if (w.u == U_B) {
+      // The guard's patch site is recorded now, where it lands; its label
+      // is not bound yet (bind() drains the window first).
+      br_cond(*w.label, PredicateRegister((int)(w.insn & 0x3f)), (ia64::BranchHint)((w.insn >> 33) & 3));
     } else {
       pack_unit(w.u, w.insn, w.d);
     }
@@ -1715,6 +1800,44 @@ class Assembler : public AbstractAssembler {
     close_bundle();
     address dest = target(L);
     emit_b(ia64::BrCondRel(bundle_disp(dest), Q, hint), d);
+  }
+  // A guard: a conditional branch to a C2 block that never comes back (an
+  // uncommon trap or a halt), whose code reads only the registers in |live|
+  // (C2_MacroAssembler::br_cond_prob).
+  // Under UseC2GuardCrossing it enters the scheduling window instead of
+  // ending it, and instructions may move across it (guard_may_cross); its
+  // patch site is recorded when the window drains (pack_win). Otherwise, or
+  // to a bound label, an ordinary br_cond.
+  void br_cond_guard(Label& L, PredicateRegister qp, ia64::BranchHint hint, const GuardLive& live) {
+    if (!UseC2GuardCrossing || !use_machine_model() || _pack_depth == 0 || !UseBundleScheduling ||
+        L.is_bound()) {
+      br_cond(L, qp, hint);
+      return;
+    }
+    if (_win_n >= win_limit()) flush_window();
+    WinInsn& w = _win[_win_n++];
+    w.insn = ia64::BrCondRel(0, Q, hint); w.imm = 0; w.u = U_B;
+    w.d = D().r(qp).branch(); w.ordered = false;
+    w.label = &L; w.live = live;
+  }
+  // Whether br_cond_guard would window a guard (C2_MacroAssembler::br_cond_prob
+  // computes the live set only then).
+  bool windows_guards() const {
+    return UseC2GuardCrossing && use_machine_model() && _pack_depth > 0 && UseBundleScheduling;
+  }
+  // Bind the label of a C2 block that only its predecessor's fall-through
+  // reaches (PhaseOutput::fill_buffer): nothing branches to it, so the
+  // scheduling window may run on into the block across the guard that ended
+  // the previous one. The label is bound to a lower bound of the block's
+  // start. If anything does refer to L, or the window is empty, bind().
+  void bind_fallthrough(Label& L) {
+    bool refers = !L.is_unused() || _win_n == 0;
+    for (int k = 0; k < _win_n && !refers; k++) refers = _win[k].u == U_B && _win[k].label == &L;
+    if (refers || !UseC2GuardCrossing || !defers_instructions()) {
+      bind(L);
+      return;
+    }
+    AbstractAssembler::bind(L);
   }
   // { cmp.ltu p7,p6 = a, b ; (p6) br.ret b0 ; br.cond L }, one MBB bundle:
   // return unless a < b (unsigned), else branch to L. One instruction group

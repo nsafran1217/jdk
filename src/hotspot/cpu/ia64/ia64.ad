@@ -850,6 +850,88 @@ int MachNode::compute_padding(int current_offset) const {
   return 0;
 }
 
+// guard_live_of: the register that holds n's value, if any, into |live|.
+// False if n has none on record (made after register allocation).
+static bool add_live_reg(PhaseRegAlloc* ra, const Node* n, Assembler::GuardLive* live) {
+  if (n->_idx >= ra->node_regs_max_index()) return false;
+  OptoReg::Name r = ra->get_reg_first(n);
+  if (!OptoReg::is_valid(r) || !OptoReg::is_reg(r)) return true;   // a stack slot, or a constant
+  VMReg v = OptoReg::as_VMReg(r);
+  if (v->is_Register()) {
+    live->add(Assembler::Deps::GR, v->as_Register()->encoding());
+  } else if (v->is_FloatRegister()) {
+    live->add(Assembler::Deps::FR, v->as_FloatRegister()->encoding());
+  } else {
+    for (int p = 6; p < 12; p++) live->add(Assembler::Deps::PR, p);   // the flags
+  }
+  return true;
+}
+
+// Guards (UseC2GuardCrossing, C2-DESIGN.md section 11 "Route Y stage 3").
+// The node being emitted is a MachIf branching to L, and L's block -- the
+// If's taken successor -- makes an uncommon-trap call or halts (a path C2
+// proved unreachable: break.b, or a stop that dies): what does that block
+// read? Every register input of its nodes defined outside it: the spill
+// copies that move values to the stack before the call, the call's
+// arguments and its debug info (all allocatable registers are save-on-call
+// across Java calls, so the trap keeps nothing else in registers). Plus
+// what the call shape and the frame rely on: gp, fp, Rthread, sp, tp, the
+// outs, and every register C2 never allocates or scratches (f32-f127,
+// p1-p5). Not the MacroAssembler temporaries t0-t4, f2-f7, p6-p11: they
+// are never live from one node into another.
+bool C2_MacroAssembler::guard_live_of(const Label* L, GuardLive* live) {
+  Compile* C = Compile::current();
+  PhaseOutput* out = C->output();
+  if (out == nullptr || out->block() == nullptr) return false;
+  Block* b = out->block();
+  if (out->index() < 0 || (uint)out->index() >= b->number_of_nodes()) return false;
+  Node* n = b->get_node(out->index());
+  if (!n->is_MachIf()) return false;
+  MachNode* m = n->as_Mach();
+  bool ours = false;
+  for (uint k = 0; k < m->num_opnds() && !ours; k++) {
+    MachOper* o = m->_opnds[k];
+    ours = o->opcode() == LABEL && o->label() == L;
+  }
+  if (!ours) return false;
+  PhaseCFG* cfg = C->cfg();
+  Block* t = b->non_connector_successor(0);
+  bool trap = false;
+  for (uint j = 0; j < t->number_of_nodes() && !trap; j++) {
+    Node* x = t->get_node(j);
+    trap = (x->is_MachCallStaticJava() && x->as_MachCallStaticJava()->_name != nullptr &&
+            strcmp(x->as_MachCallStaticJava()->_name, "uncommon_trap") == 0) ||
+           (x->is_Mach() && x->as_Mach()->ideal_Opcode() == Op_Halt);   // never comes back either
+  }
+  if (!trap) return false;
+  *live = GuardLive();
+  static const int fixed_gr[] = { 1, 4, 5, 12, 13 };
+  for (int r : fixed_gr) live->add(Deps::GR, r);
+  for (int r = 32; r < 40; r++) live->add(Deps::GR, r);
+  for (int f = 32; f < 128; f++) live->add(Deps::FR, f);
+  for (int p = 1; p < 6; p++) live->add(Deps::PR, p);
+  PhaseRegAlloc* ra = C->regalloc();
+  for (uint j = 0; j < t->number_of_nodes(); j++) {
+    Node* x = t->get_node(j);
+    // A node of the block that emits no code holds a value that comes from
+    // outside it: a Phi (guards sharing the trap block; its inputs' copies
+    // are in the predecessors), a projection of a node elsewhere, the
+    // exception oop. Its own register is live in.
+    if (x->is_Phi() || (x->is_Proj() && x->in(0) != nullptr && cfg->get_block_for_node(x->in(0)) != t) ||
+        (x->is_Mach() && x->as_Mach()->ideal_Opcode() == Op_CreateEx)) {
+      if (!add_live_reg(ra, x, live)) return false;
+    }
+    for (uint k = 1; k < x->req(); k++) {
+      Node* in = x->in(k);
+      if (in == nullptr || cfg->get_block_for_node(in) == t) continue;
+      // Not only MachNodes: a call's result is a MachProjNode, a ProjNode.
+      if (!add_live_reg(ra, in, live)) return false;
+    }
+  }
+  return true;
+}
+
+
 //=============================================================================
 
 // Byte offset from the start of each kind of call node to the return address,

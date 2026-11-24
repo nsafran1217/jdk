@@ -175,6 +175,11 @@ void C2_MacroAssembler::br_cond_prob(Label& L, PredicateRegister qp, float prob)
   if (UseC2ProbBranchHints && prob >= 0.0f) {
     hint = (prob > 0.5f) ? ia64::kDptk : ia64::kDpnt;
   }
+  GuardLive live;
+  if (windows_guards() && !L.is_bound() && guard_live_of(&L, &live)) {
+    br_cond_guard(L, qp, hint, live);
+    return;
+  }
   br_cond(L, qp, hint);
 }
 

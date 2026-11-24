@@ -1504,6 +1504,19 @@ void PhaseOutput::fill_buffer(C2_MacroAssembler* masm, uint* blk_starts) {
     int blk_offset = current_offset;
 
     // Define the label at the beginning of the basic block
+#ifdef IA64
+    // A block only the fall-through of the previous block's If reaches: no
+    // branch targets its label, so the assembler's scheduling window may run
+    // on into it, across that If (UseC2GuardCrossing).
+    Block* prev = (i > 1) ? C->cfg()->get_block(i - 1) : nullptr;
+    uint prev_n = (prev != nullptr) ? prev->number_of_nodes() : 0;
+    if (prev != nullptr && block->num_preds() == 2 && prev->_num_succs == 2 && prev_n >= 1 &&
+        prev->get_node(prev_n - 1)->is_MachIf() &&
+        C->cfg()->get_block_for_node(block->pred(1)) == prev &&
+        prev->non_connector_successor(0) != block) {
+      masm->bind_fallthrough(blk_labels[block->_pre_order]);
+    } else
+#endif
     masm->bind(blk_labels[block->_pre_order]);
 #ifdef IA64
     // bind() emits the instructions the previous block's last nodes left in
@@ -1832,6 +1845,11 @@ void PhaseOutput::fill_buffer(C2_MacroAssembler* masm, uint* blk_starts) {
     }
     // Verify that the distance for generated before forward
     // short branches is still valid.
+#ifdef IA64
+    // Under UseC2CrossNodeScheduling a block's instructions may be emitted
+    // while later blocks are; IA-64 has no short branches to keep in range.
+    if (!masm->defers_instructions())
+#endif
     guarantee((int)(blk_starts[i+1] - blk_starts[i]) >= (current_offset - blk_offset), "shouldn't increase block size");
 
     // Save new block start offset

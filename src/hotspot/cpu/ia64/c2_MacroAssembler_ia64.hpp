@@ -86,6 +86,11 @@
   void float_cmp_branch(int cmpcode, FloatRegister a, FloatRegister b, Label& L, float prob = -1.0f);
   // A conditional branch on qp with its whether-hint from prob.
   void br_cond_prob(Label& L, PredicateRegister qp, float prob);
+  // Whether the node being emitted (PhaseOutput::block()/index()) is a
+  // MachIf whose branch to L goes to an uncommon-trap block; if so, the
+  // registers that block reads, for br_cond_guard (UseC2GuardCrossing).
+  // Defined in ia64.ad, which knows the label operand.
+  static bool guard_live_of(const Label* L, GuardLive* live);
 
   // Set (pt, pf) to (a <cmpcode> b, its complement).
   void cmp_preds(int cmpcode, CmpKind kind, Register a, Register b,
