@@ -967,7 +967,7 @@ class Assembler : public AbstractAssembler {
       case SK_ST: case SK_SETF: q.st++; break;
       case SK_GETF: q.getf++; break;
       case SK_L: q.i++; q.n++; break;            // L+X: an I port, two syllables
-      case SK_BR: break;                         // a B slot; one per cycle (flush_window_machine)
+      case SK_BR: break;                         // a B slot; up to three a cycle (flush_window_machine)
       default:
         switch (u) {
           case U_M: q.mgen++; break;
@@ -1282,10 +1282,11 @@ class Assembler : public AbstractAssembler {
     const bool stress = C2SchedStressSeed != 0;
     for (int cycle = 0; placed < n;) {
       Ports ports = {};
-      // A guard taken in this cycle goes last in it: Itanium 2 splits issue
-      // after any bundle holding a branch (itanium2-sw 3.3.3). Its
-      // successors wait for the next cycle.
-      int branch = -1;
+      // Guards taken in this cycle go last in it, up to three in one bundle
+      // (pack_guards): Itanium 2 splits issue after any bundle holding a
+      // branch (itanium2-sw 3.3.3). Their other successors wait for the next
+      // cycle.
+      int branches[3], nbr = 0;
       for (;;) {
         int best = -1, best_at = -1;
         if (stress) {
@@ -1294,7 +1295,7 @@ class Assembler : public AbstractAssembler {
           for (int r = 0; r < nready; r++) {
             int j = ready[r];
             if (earliest[j] > cycle || !sched_fits(ports, _win[j].u, s[j].k)) continue;
-            if (s[j].k == SK_BR && branch >= 0) continue;
+            if (s[j].k == SK_BR && nbr >= 3) continue;
             if (best < 0 || prio[j] > prio[best] || (prio[j] == prio[best] && j < best)) {
               best = j; best_at = r;
             }
@@ -1304,7 +1305,14 @@ class Assembler : public AbstractAssembler {
         sched_take(ports, _win[best].u, s[best].k);
         ready[best_at] = ready[--nready];
         if (!stress && s[best].k == SK_BR) {
-          branch = best;
+          branches[nbr++] = best;
+          // The guards it orders may join it in this cycle.
+          for (int k = 0; k < nsucc[best]; k++) {
+            int t = succ[best][k];
+            if (s[t].k != SK_BR) continue;
+            if (cycle > earliest[t]) earliest[t] = cycle;
+            if (--npred[t] == 0) ready[nready++] = (uint8_t)t;
+          }
           continue;
         }
         order[placed++] = best;
@@ -1316,10 +1324,12 @@ class Assembler : public AbstractAssembler {
         }
         if (stress) break;
       }
-      if (branch >= 0) {
-        order[placed++] = branch;
-        for (int k = 0; k < nsucc[branch]; k++) {
-          int t = succ[branch][k];
+      for (int q = 0; q < nbr; q++) {
+        const int b = branches[q];
+        order[placed++] = b;
+        for (int k = 0; k < nsucc[b]; k++) {
+          int t = succ[b][k];
+          if (s[t].k == SK_BR) continue;          // released when b was taken
           int at = cycle + 1;
           if (at > earliest[t]) earliest[t] = at;
           if (--npred[t] == 0) ready[nready++] = (uint8_t)t;
@@ -1333,9 +1343,58 @@ class Assembler : public AbstractAssembler {
       }
       cycle = next;
     }
-    for (int k = 0; k < n; k++) {
-      const WinInsn& w = _win[order[k]];
-      pack_win(w);
+    for (int k = 0; k < n;) {
+      if (_win[order[k]].u != U_B) {
+        pack_win(_win[order[k++]]);
+        continue;
+      }
+      const WinInsn* run[3];
+      int m = 0;
+      while (m < 3 && k < n && _win[order[k]].u == U_B) run[m++] = &_win[order[k++]];
+      pack_guards(run, m);
+    }
+  }
+
+  // Consecutive guards from the window (flush_window_machine): two share an
+  // MBB bundle -- with the open bundle's lone M or A instruction in slot 0
+  // when it has one -- and three a BBB, where one each would take a bundle
+  // and, since Itanium 2 splits issue after every bundle that holds a
+  // branch, a cycle. A branch in slot 0 or 1 has the patch site bundle + 1
+  // or + 2 (Assembler::pd_patch_instruction). A taken branch skips the
+  // slots after it, so the order is still program order.
+  void pack_guards(const WinInsn* const* g, int m) {
+    if (m == 1 || !UseBranchPacking || _pack_depth == 0) {
+      for (int i = 0; i < m; i++) pack_win(*g[i]);
+      return;
+    }
+    Deps d = D().branch();
+    for (int i = 0; i < m; i++) d.r(PredicateRegister((int)(g[i]->insn & 0x3f)));
+    address bundle;
+    const int first = (m == 2) ? 1 : 0;          // the slot of the first branch
+    if (m == 2 && _ob_open && _ob_n == 1 && (_ob_unit[0] == U_M || _ob_unit[0] == U_A) &&
+        _ob_sect == code_section() && _ob_off == raw_offset() - BytesPerBundle && !conflicts(d)) {
+      bundle = _ob_sect->start() + _ob_off;
+      ia64::Bundle b = ia64::MakeBundle(ia64::tMBB_, _ob_insn[0], g[0]->insn, g[1]->insn);
+      *(uint64_t*)bundle = b.lo;
+      *(uint64_t*)(bundle + 8) = b.hi;
+      _ob_open = false;
+      end_group();                      // the branches keep their stop
+    } else {
+      close_bundle();
+      bundle = AbstractAssembler::pc();
+      ia64::Bundle b = (m == 2) ? ia64::MakeBundle(ia64::tMBB_, ia64::NopM(), g[0]->insn, g[1]->insn)
+                                : ia64::MakeBundle(ia64::tBBB_, g[0]->insn, g[1]->insn, g[2]->insn);
+      emit_bundle(b, &d);
+    }
+    for (int i = 0; i < m; i++) {
+      const int slot = first + i;
+      Label& L = *g[i]->label;
+      if (L.is_bound()) {
+        address dest = code_section()->target(L, bundle);
+        ia64::PatchBranchDispSlot((ia64::Bundle*)bundle, slot, bundle_disp(dest, bundle));
+      } else {
+        code_section()->target(L, bundle + (slot == 2 ? 0 : slot + 1));
+      }
     }
   }
 

@@ -35,11 +35,18 @@ static uint8_t bundle_template(const ia64::Bundle* b) {
   return (uint8_t)(b->lo & 0x1f);
 }
 
-void Assembler::pd_patch_instruction(address branch, address target, const char* file, int line) {
-  assert(is_aligned(branch, BytesPerBundle) && is_aligned(target, BytesPerBundle),
-         "patch site and target must be bundle-aligned");
+void Assembler::pd_patch_instruction(address site, address target, const char* file, int line) {
+  // A patch site names its bundle, plus 1 or 2 for a branch in slot 0 or 1
+  // (pack_guards: MBB, BBB); a bundle-aligned site is a branch in slot 2, or
+  // an la() movl.
+  const int off = (int)((uintptr_t)site & (BytesPerBundle - 1));
+  const address branch = site - off;
+  const int slot = (off == 0) ? 2 : off - 1;
+  assert(off <= 2 && is_aligned(target, BytesPerBundle), "patch site and target must be bundle-aligned");
   ia64::Bundle* b = (ia64::Bundle*)branch;
   switch (bundle_template(b)) {
+    case ia64::tBBB:
+    case ia64::tBBB_:
     case ia64::tMIB:
     case ia64::tMIB_:
     case ia64::tMMB:
@@ -48,18 +55,23 @@ void Assembler::pd_patch_instruction(address branch, address target, const char*
     case ia64::tMFB_:
     case ia64::tMBB:
     case ia64::tMBB_: {
-      // An IP-relative br.cond / br.call in slot 2 (Assembler::br_cond,
-      // br_call; MMB and MFB when packed with the bundle's other
-      // instructions; MBB from ret_unless_ltu). The displacement is from the
-      // branch's own bundle.
+      // An IP-relative br.cond / br.call (Assembler::br_cond, br_call; MMB
+      // and MFB when packed with the bundle's other instructions; MBB from
+      // ret_unless_ltu; MBB and BBB with guards in slots 0-2 from
+      // pack_guards). The displacement is from the branch's own bundle.
       intptr_t disp = (target - branch) / BytesPerBundle;
       guarantee(ia64::BranchDispInRange((int32_t)disp),
                 "branch out of +/-16 MiB range at %s:%d", file, line);
-      ia64::PatchBranchDisp(b, (int32_t)disp);
+      if (slot == 2) {
+        ia64::PatchBranchDisp(b, (int32_t)disp);
+      } else {
+        ia64::PatchBranchDispSlot(b, slot, (int32_t)disp);
+      }
       break;
     }
     case ia64::tMLX:
     case ia64::tMLX_:
+      assert(off == 0, "a movl patch site is its bundle");
       // The movl of an la() sequence. Its base is the `mov r = ip` bundle
       // emitted immediately before it.
       ia64::WriteMovlImm(b, (uint64_t)(target - (branch - BytesPerBundle)));

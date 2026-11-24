@@ -672,6 +672,35 @@ inline void PatchBranchDisp(Bundle* b, int32_t bundleDisp) {
   b->hi = (b->hi & ((uint64_t(1) << 23) - 1)) | (slot2 << 23);
 }
 
+// Slot k (0-2) of |b|: slot 0 is bundle bits 45:5, slot 1 bits 86:46 (lo
+// 63:46 and hi 22:0), slot 2 bits 127:87.
+inline Insn GetSlot(const Bundle* b, int k) {
+  const uint64_t kSlotMask = (uint64_t(1) << 41) - 1;
+  switch (k) {
+    case 0:  return (b->lo >> 5) & kSlotMask;
+    case 1:  return ((b->lo >> 46) | (b->hi << 18)) & kSlotMask;
+    default: return (b->hi >> 23) & kSlotMask;
+  }
+}
+inline void SetSlot(Bundle* b, int k, Insn x) {
+  const uint64_t kSlotMask = (uint64_t(1) << 41) - 1;
+  x &= kSlotMask;
+  switch (k) {
+    case 0:  b->lo = (b->lo & ~(kSlotMask << 5)) | (x << 5); break;
+    case 1:  b->lo = (b->lo & ((uint64_t(1) << 46) - 1)) | (x << 46);
+             b->hi = (b->hi & ~((uint64_t(1) << 23) - 1)) | (x >> 18); break;
+    default: b->hi = (b->hi & ((uint64_t(1) << 23) - 1)) | (x << 23); break;
+  }
+}
+// PatchBranchDisp for an IP-relative branch in any slot (MBB slot 1, BBB
+// slots 0-1: Assembler::pack_guards). The displacement is still from the
+// bundle's own address.
+inline void PatchBranchDispSlot(Bundle* b, int slot, int32_t bundleDisp) {
+  Insn x = GetSlot(b, slot);
+  Insn clearMask = (Insn(0xfffff) << 13) | (Insn(1) << 36);
+  SetSlot(b, slot, (x & ~clearMask) | fTgt25c(bundleDisp));
+}
+
 // The IP-relative displacement (in bundles) of the branch in slot 2 of |b|.
 inline int32_t ReadBranchDisp(const Bundle* b) {
   const uint64_t kSlotMask = (uint64_t(1) << 41) - 1;
